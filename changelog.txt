@@ -422,3 +422,21 @@ and patch-applied source hashes are compared with the exact final snapshots.
 The named folder is verified using its own bundled interpreter, the handed-
 off regression tests, isolated Python/C++ DLL locations and actual BAT/model
 processing. PACKAGE_VERIFICATION.txt summarizes the final packaging checks.
+
+SETUP SCRIPT FOLLOW-UP - 2026-10-21 - setup_portable.bat
+
+New one-click source-side setup for Windows:
+- Finds Python 3.11 (py -3.11, python, or python3) or exits with install
+  guidance (winget install Python.Python.3.11).
+- Creates venv/ (reused if present) and installs the pinned
+  torch==2.9.1 / torchvision==0.24.1 (CUDA 12.8 index) plus requirements.txt.
+- Runs scripts/download_weights.py (skips files that are already present).
+- Checks ffmpeg on PATH; copies ffmpeg.exe next to the app files for the
+  portable build; prints install guidance when it is missing.
+- Optional portable build (end prompt, or the /PORTABLE argument): checks
+  for the Visual Studio C++ app-local Microsoft.VC143.CRT redistributable
+  and runs tools/make_portable.ps1.
+- README.md: one pointer to the script in the Setup section.
+
+The model, runtime, launcher, weights and portable build are unchanged by
+this script; it only automates the documented manual setup steps.
