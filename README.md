@@ -55,7 +55,7 @@ The download script fetches:
 
 After that everything loads from those local folders.
 
-On Windows, you can run setup_portable.bat from the repository root to do all of the above in one step. It creates the Python 3.11 venv, installs the pinned CUDA PyTorch and the rest of equirements.txt, downloads the weights and foundation models, and checks for fmpeg on your PATH. At the end it can also build the optional portable untime\ folder (see 	ools/make_portable.ps1).
+On Windows, you can run `setup_portable.bat` from the repository root to do all of the above in one step. It creates the Python 3.11 venv, installs the pinned CUDA PyTorch and the rest of `requirements.txt`, downloads the weights and foundation models, and checks for `ffmpeg` on your PATH. At the end it can also build the optional portable `runtime\` folder (see `tools/make_portable.ps1`).
 
 ## Drag-And-Drop Launcher
 
