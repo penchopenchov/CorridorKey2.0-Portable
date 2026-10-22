@@ -520,3 +520,29 @@ Validation:
 - Read-only code review found no actionable issues. Syntax and whitespace
   checks passed. These checks establish sample decode equivalence; performance
   improvement is user-confirmed; a numeric speedup has not been benchmarked.
+
+PORTABLE SETUP BACK NAVIGATION - 2026-10-21
+
+- Created checkpoint-before-menu-back-2026-10-21 at f0feb16 before editing.
+- Added cli_menu.py for b/back navigation throughout portable setup, including
+  interactive source selection, conditional settings, custom Hann windows,
+  manual thread counts and per-clip matte-file selection. Accepted answers
+  become the defaults when revisited; Enter keeps them. Optional output/cache
+  folder questions accept - to restore their original default.
+- Rebuilds effective Settings and Jobs when navigating back, so switching
+  branches drops inactive settings without losing remembered answers.
+- Final review now offers Start / Back / Cancel. Setup navigation only reads
+  files; decoding, output creation and inference begin after Start.
+- Default matte confidence is now 0.75 in the portable launcher and its saved
+  settings/inference command. The menu still offers manual confidence values;
+  a clean artist-provided mask can use 0.95. Review displays confidence.
+- Updated portable usage guides. Original run_interactive.py and model/runtime
+  implementation are unchanged by this update.
+
+Validation (temporary files only):
+- Seventeen navigation checks passed, including conditional branch changes,
+  previous-answer defaults, invalid input, source/matte selection, folder
+  reset, final-review Back/Cancel and a real redirected CLI cancellation.
+- Eleven historical launcher regressions passed, including real FFmpeg MP4
+  and ProRes decoding/precision checks. Menu fixtures retain the Auto CPU
+  answer introduced in the preceding update.

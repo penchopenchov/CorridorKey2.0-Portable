@@ -84,7 +84,10 @@ Full matte:
   Matte values are coverage data, so the matte decode applies no gamma change.
   A video matte must match source FPS and have enough selected frames.
 
-For rough AE roto, start with trust 0.75. A clean artist mask can use 0.95.
+Matte confidence defaults to 0.75 for rough roto. A clean artist mask can use
+0.95. During portable launcher setup, type b or back to revisit the previous
+question. Enter keeps a previous answer; - restores the default on optional
+output/cache folder questions. The final review offers Start, Back and Cancel.
 Authoritative mode passes --no_carry_hint and uses the supplied mask on every
 pass. Leave it off initially when you want carried predictions to help refine
 a rough mask. A rough mask can steer systematic selection errors; inspect the

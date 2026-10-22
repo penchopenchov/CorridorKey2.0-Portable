@@ -26,7 +26,8 @@ COPYING TO ANOTHER PC
 Copy this complete folder to a locally available drive on the other PC.
 Keep these components together with their relative layout:
 
-- CorridorKey_DRAG_CLIPS_HERE.bat, corridorkey_launcher.py, run_interactive.py,
+- CorridorKey_DRAG_CLIPS_HERE.bat, corridorkey_launcher.py, cli_menu.py,
+  cli_progress.py, run_interactive.py,
   infer.py and the other application source files
 - corridorkey/ and third_party/
 - runtime/ (Python, DLLs, standard library and installed dependencies)

@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from cli_progress import Progress, progress_job
+from cli_menu import SetupMenu
 
 # Video metadata probing imports OpenCV before decoded float EXRs are read.
 # OpenCV caches this option when it loads, so configure it at process startup.
@@ -20,7 +21,7 @@ os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 
 from run_interactive import (
     clean_path, find_first_frame_hint,
-    print_header, prompt_choices, prompt_confirm, prompt_hann_window, prompt_input,
+    print_header,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -35,7 +36,7 @@ class Settings:
     input_color: str = 'srgb'
     input_range: str = 'auto'
     hint_mode: str = 'none'
-    hint_quality: float = 0.95
+    hint_quality: float = 0.75
     authoritative: bool = False
     output_format: str = 'video'
     exr_dtype: str = 'half'
@@ -112,71 +113,86 @@ def bounded_float(text, lower=0.0, upper=1.0):
         return None
 
 
-def prompt_settings(*, has_sequences):
+def prompt_settings(*, has_sequences, menu=None):
+    if menu is None:
+        return SetupMenu().run(lambda current: prompt_settings(has_sequences=has_sequences, menu=current))
     settings = Settings()
-    print_header('Input color - how the SOURCE RGB values are encoded')
-    color = prompt_choices('Choose source color:', [
+    menu.note('\nInput color - how the SOURCE RGB values are encoded')
+    color = menu.choices('input_color', 'Choose source color:', [
         'sRGB (standard images / sRGB-encoded video)',
         'Rec.709 (BT.709 transfer, non-linear)',
         'Linear Rec.709 / gamma 1.0 (including linear ProRes 4444)',
     ])
     settings.input_color = ('srgb', 'rec709', 'linear')[color - 1]
-    print('ProRes 4444 is a codec; choose the transfer used when the clip was exported.')
-    levels = prompt_choices('Video data levels (ignored for image sequences):', [
+    menu.note('ProRes 4444 is a codec; choose the transfer used when the clip was exported.')
+    levels = menu.choices('input_range', 'Video data levels (ignored for image sequences):', [
         'Auto - use decoded video range metadata', 'Limited / video / TV levels', 'Full / data / PC levels',
     ])
     settings.input_range = ('auto', 'limited', 'full')[levels - 1]
     if has_sequences:
-        settings.sequence_fps = float(prompt_input('Image sequence frame rate', default='24',
+        settings.sequence_fps = float(menu.text('sequence_fps', 'Image sequence frame rate', default='24',
                                                    validator=lambda x: bounded_float(x, 0.001, 1000)))
-    print_header('Matte / subject guidance')
-    matte = prompt_choices('What matte do you have?', [
+    menu.note('\nMatte / subject guidance')
+    matte = menu.choices('hint_mode', 'What matte do you have?', [
         'No matte - let the model choose the foreground',
         'First-frame matte - a mask image for the first frame',
         'Full matte - a matching matte video or image sequence',
     ])
     settings.hint_mode = ('none', 'first', 'full')[matte - 1]
     if settings.hint_mode != 'none':
-        settings.hint_quality = float(prompt_input('Matte trust: 0.95 clean / 0.75 rough',
-                                                   default='0.95', validator=bounded_float))
+        settings.hint_quality = float(menu.text('hint_quality', 'Matte confidence / trust: 0.95 clean / 0.75 rough',
+                                                default='0.75', validator=bounded_float))
         if settings.hint_mode == 'full':
-            settings.authoritative = prompt_confirm('Use the supplied matte on every frame (disable carried predictions)?', default=False)
-    print_header('Exports')
-    output = prompt_choices('Output format:', [
+            settings.authoritative = menu.confirm('authoritative', 'Use the supplied matte on every frame (disable carried predictions)?', default=False)
+    menu.note('\nExports')
+    output = menu.choices('output_format', 'Output format:', [
         'Video - ProRes 4444 cutout with alpha, plus H.264 previews',
         'EXR sequences - scene-linear HDR, cutout includes RGBA',
     ])
     settings.output_format = ('video', 'exr')[output - 1]
     if settings.output_format == 'exr':
-        precision = prompt_choices('EXR precision:', ['Half float (16-bit)', 'Full float (32-bit)'])
+        precision = menu.choices('exr_dtype', 'EXR precision:', ['Half float (16-bit)', 'Full float (32-bit)'])
         settings.exr_dtype = ('half', 'float')[precision - 1]
     names = ('alpha', 'fg', 'cutout', 'checker')
-    print('1) Alpha matte  2) Foreground RGB  3) Transparent cutout  4) Checker preview')
-    while True:
-        answer = input('Outputs: enter numbers separated by spaces [Enter = all four]: ').strip()
+    def outputs(answer):
         try:
-            indices = list(dict.fromkeys(int(n) for n in answer.replace(',', ' ').split())) if answer else [1, 2, 3, 4]
+            indices = list(dict.fromkeys(int(n) for n in answer.replace(',', ' ').split()))
             if not indices or any(n < 1 or n > 4 for n in indices):
                 raise ValueError
-            settings.outputs = tuple(names[n - 1] for n in indices)
-            break
+            return tuple(names[n - 1] for n in indices)
         except ValueError:
-            print('Choose only output numbers 1 through 4.')
+            raise ValueError('Choose only output numbers 1 through 4.')
+    settings.outputs = menu.text('outputs', 'Outputs: 1) Alpha matte  2) Foreground RGB  3) Transparent cutout  4) Checker preview\nEnter numbers separated by spaces.',
+                                 default='1 2 3 4', validator=outputs)
     if settings.output_format == 'video' and 'cutout' in settings.outputs:
-        color = prompt_choices('OUTPUT cutout color (independent of source color):', [
+        color = menu.choices('cutout_linear', 'OUTPUT cutout color (independent of source color):', [
             'Straight sRGB RGB + linear alpha (standard editing)',
             'Straight linear Rec.709 RGB + linear alpha',
         ])
         settings.cutout_linear = color == 2
     if {'checker', 'cutout'}.intersection(settings.outputs):
-        settings.despill_strength = float(prompt_input('Despill strength [0 = none, 1 = full]',
+        settings.despill_strength = float(menu.text('despill_strength', 'Despill strength [0 = none, 1 = full]',
                                                        default='0.5', validator=bounded_float))
-    memory = prompt_choices('GPU memory:', ['Auto - choose settings from free VRAM', 'Manual - low VRAM / temporal window'])
+    memory = menu.choices('memory', 'GPU memory:', ['Auto - choose settings from free VRAM', 'Manual - low VRAM / temporal window'])
     if memory == 2:
-        settings.low_vram = prompt_confirm('Enable low-VRAM mode?', default=True)
-        settings.hann_chunk, settings.hann_stride = prompt_hann_window()
+        settings.low_vram = menu.confirm('low_vram', 'Enable low-VRAM mode?', default=True)
+        window = menu.choices('hann_window', 'Select Hann Window Presets (Temporal Context):', [
+            'High VRAM (48 chunk, 24 stride) - Recommended for standard GPUs',
+            'Medium VRAM (24 chunk, 12 stride) - Lower peak memory',
+            'Low VRAM (8 chunk, 4 stride) - Minimal memory, fast startup',
+            'Max Continuity (80 chunk, 40 stride) - Requires high workstation VRAM',
+            'Custom Size',
+        ])
+        if window == 5:
+            def positive_int(text):
+                value = int(text)
+                return value if value > 0 else None
+            settings.hann_chunk = menu.text('hann_chunk', 'Enter Hann Chunk (positive integer)', default='48', validator=positive_int)
+            settings.hann_stride = menu.text('hann_stride', 'Enter Hann Stride (positive integer)', default='24', validator=positive_int)
+        else:
+            settings.hann_chunk, settings.hann_stride = {1: (48, 24), 2: (24, 12), 3: (8, 4), 4: (80, 40)}[window]
     logical_cpus = os.cpu_count() or 1
-    preparation = prompt_choices('CPU preparation threads:', [
+    preparation = menu.choices('preparation', 'CPU preparation threads:', [
         f'Auto - let FFmpeg choose ({logical_cpus} logical CPUs detected)',
         'Manual - choose a thread count',
         'Conservative - 2 EXR encoder threads (previous setting)',
@@ -188,12 +204,12 @@ def prompt_settings(*, has_sequences):
                 return value if 1 <= value <= logical_cpus else None
             except ValueError:
                 return None
-        settings.preparation_threads = int(prompt_input(
-            f'EXR encoding threads [1-{logical_cpus}]', default=str(min(8, logical_cpus)),
+        settings.preparation_threads = int(menu.text(
+            'preparation_threads', f'EXR encoding threads [1-{logical_cpus}]', default=str(min(8, logical_cpus)),
             validator=thread_count))
     elif preparation == 3:
         settings.preparation_threads = 2
-    print('Controls temporary video-to-EXR encoding. More threads can increase RAM use.')
+    menu.note('Controls temporary video-to-EXR encoding. More threads can increase RAM use.')
     def frame_limit(text):
         if text.lower() == 'all':
             return -1
@@ -202,18 +218,20 @@ def prompt_settings(*, has_sequences):
             return value if value > 0 else None
         except ValueError:
             return None
-    limit = prompt_input('Process first N frames, or all', default='all', validator=frame_limit)
+    limit = menu.text('num_frames', 'Process first N frames, or all', default='all', validator=frame_limit)
     settings.num_frames = -1 if str(limit).lower() == 'all' else int(limit)
-    destination = prompt_input('Output parent folder [default: beside each source]', default='')
+    destination = menu.text('output_root', 'Output parent folder [default: beside each source]', default='')
     settings.output_root = Path(clean_path(destination)) if destination else None
-    print('High-precision decoding uses temporary float EXRs, removed after each job.')
-    cache = prompt_input(f'Temporary cache folder [default: {settings.cache_root}]', default='')
+    menu.note('High-precision decoding uses temporary float EXRs, removed after each job.')
+    cache = menu.text('cache_root', f'Temporary cache folder [default: {settings.cache_root}]', default='')
     if cache:
         settings.cache_root = Path(clean_path(cache))
     return settings
 
 
-def resolve_hint(job, mode):
+def resolve_hint(job, mode, menu=None):
+    if menu is None:
+        return SetupMenu().run(lambda current: resolve_hint(job, mode, menu=current))
     if mode == 'none':
         return None
     if mode == 'first':
@@ -225,19 +243,18 @@ def resolve_hint(job, mode):
     if mode == 'full' and job.source.is_dir():
         candidate = next((p for p in job.source.iterdir() if p.is_dir() and p.name.lower() == 'alphahint'), candidate)
     if candidate and (mode == 'full' or candidate.suffix.lower() in IMAGE_EXTENSIONS):
-        if prompt_confirm(f'Use companion matte for {job.source.name}: {candidate}?', default=True):
+        if menu.confirm(('companion', job.source, mode, candidate), f'Use companion matte for {job.source.name}: {candidate}?', default=True):
             return Path(candidate)
-    while True:
-        kind = 'first-frame matte image / folder' if mode == 'first' else 'full matte video / frame folder'
-        answer = input(f'Drag the {kind} for {job.source.name} here: ').strip()
-        if answer:
-            path = Path(clean_path(answer))
-            valid_dir = path.is_dir() and bool(image_files(path))
-            valid_file = path.is_file() and path.suffix.lower() in (
-                IMAGE_EXTENSIONS if mode == 'first' else VIDEO_EXTENSIONS)
-            if valid_dir or valid_file:
-                return path
-        print('Matte path is missing or unsupported. Supply an existing mask; Ctrl+C cancels.')
+    def matte_path(answer):
+        path = Path(clean_path(answer))
+        valid_dir = path.is_dir() and bool(image_files(path))
+        valid_file = path.is_file() and path.suffix.lower() in (
+            IMAGE_EXTENSIONS if mode == 'first' else VIDEO_EXTENSIONS)
+        if valid_dir or valid_file:
+            return path
+        raise ValueError('Matte path is missing or unsupported. Supply an existing mask; Ctrl+C cancels.')
+    kind = 'first-frame matte image / folder' if mode == 'first' else 'full matte video / frame folder'
+    return menu.text(('matte_path', job.source, mode), f'Drag the {kind} for {job.source.name} here', validator=matte_path)
 
 
 def decode_transfer(values, color):
@@ -450,43 +467,52 @@ def run_job(job, settings, ffmpeg):
     print(f'Finished: {destination}', flush=True)
 
 
+def prompt_run(paths, menu):
+    if paths:
+        jobs = collect_jobs([Path(clean_path(path)) for path in paths])
+    else:
+        jobs = menu.text('source', 'Drag a video, frame folder, or folder of clips here',
+                         validator=lambda value: collect_jobs([Path(clean_path(value))]))
+    settings = prompt_settings(has_sequences=any(job.input_path.is_dir() for job in jobs), menu=menu)
+    for job in jobs:
+        job.hint = resolve_hint(job, settings.hint_mode, menu=menu)
+    menu.note('\nReview settings')
+    menu.note(f'Input color: {COLOR_LABELS[settings.input_color]} | Video levels: {settings.input_range}')
+    menu.note(f'Matte: {settings.hint_mode} | Confidence: {settings.hint_quality:g} | Output: {settings.output_format} | Files: {", ".join(settings.outputs)}')
+    menu.note('Cutout color: ' + ('Linear Rec.709' if settings.output_format == 'exr' or settings.cutout_linear else 'sRGB'))
+    thread_label = 'Auto (FFmpeg chooses)' if settings.preparation_threads == 0 else str(settings.preparation_threads)
+    menu.note(f'CPU preparation threads: {thread_label}')
+    menu.note(f'Frames: {settings.num_frames if settings.num_frames > 0 else "all"} | Cache: {settings.cache_root}')
+    menu.note('Temporary float frames can use substantial disk space for long 4K clips.')
+    for index, job in enumerate(jobs, 1):
+        menu.note(f'{index}. {job.source} -> {output_folder(job, settings)}')
+        if job.hint:
+            menu.note(f'   Matte: {job.hint}')
+    destinations = [output_folder(job, settings).resolve() for job in jobs]
+    if len(set(destinations)) != len(destinations):
+        raise ValueError('Two inputs map to the same output folder. Process them separately or rename them.')
+    if any(folder.exists() and any(folder.iterdir()) for folder in destinations):
+        menu.note('Existing output folders may contain files that this run will overwrite.')
+    return (jobs, settings) if menu.review() else None
+
+
 def main(argv=None):
     if os.name == 'nt':
         os.system('')
     print_header('CorridorKey 2.0 - guided color and matte setup')
     try:
         paths = sys.argv[1:] if argv is None else argv
-        if not paths:
-            paths = [input('Drag a video, frame folder, or folder of clips here, then press Enter:\n').strip()]
         if not all(path.strip() for path in paths):
             raise ValueError('No input selected.')
-        jobs = collect_jobs([Path(clean_path(path)) for path in paths])
-        settings = prompt_settings(has_sequences=any(job.input_path.is_dir() for job in jobs))
-        for job in jobs:
-            job.hint = resolve_hint(job, settings.hint_mode)
         ffmpeg = ROOT / 'ffmpeg.exe' if (ROOT / 'ffmpeg.exe').is_file() else shutil.which('ffmpeg')
         if not ffmpeg:
             raise ValueError('FFmpeg is missing. Restore ffmpeg.exe in the installation folder.')
-        print_header('Review settings')
-        print(f'Input color: {COLOR_LABELS[settings.input_color]} | Video levels: {settings.input_range}')
-        print(f'Matte: {settings.hint_mode} | Output: {settings.output_format} | Files: {", ".join(settings.outputs)}')
-        print('Cutout color: ' + ('Linear Rec.709' if settings.output_format == 'exr' or settings.cutout_linear else 'sRGB'))
-        thread_label = 'Auto (FFmpeg chooses)' if settings.preparation_threads == 0 else str(settings.preparation_threads)
-        print(f'CPU preparation threads: {thread_label}')
-        print(f'Frames: {settings.num_frames if settings.num_frames > 0 else "all"} | Cache: {settings.cache_root}')
-        print('Temporary float frames can use substantial disk space for long 4K clips.')
-        for index, job in enumerate(jobs, 1):
-            print(f'{index}. {job.source} -> {output_folder(job, settings)}')
-            if job.hint:
-                print(f'   Matte: {job.hint}')
-        destinations = [output_folder(job, settings).resolve() for job in jobs]
-        if len(set(destinations)) != len(destinations):
-            raise ValueError('Two inputs map to the same output folder. Process them separately or rename them.')
-        if any(folder.exists() and any(folder.iterdir()) for folder in destinations):
-            print('Existing output folders may contain files that this run will overwrite.')
-        if not prompt_confirm('Start processing with these settings?', default=True):
+        print('Setup: type b or back to revisit the previous question. Enter keeps the displayed default.')
+        configured = SetupMenu().run(lambda menu: prompt_run(paths, menu))
+        if configured is None:
             print('Canceled. No clips processed.')
             return 0
+        jobs, settings = configured
         for index, job in enumerate(jobs, 1):
             print_header(f'Clip {index}/{len(jobs)}: {job.source.name}')
             with progress_job(f'{index}/{len(jobs)}'):

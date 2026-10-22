@@ -13,6 +13,11 @@ compatible NVIDIA driver. The app does not install a GPU driver.
 
 HOW TO PROCESS A CLIP
 
+During setup, type b or back at any question to revisit the previous one.
+Your previous answers become the defaults: press Enter to keep them. For
+output/cache folder questions, type - to restore the original default.
+The final review offers Start, Back and Cancel. Processing begins at Start.
+
 1. Double-click CorridorKey_DRAG_CLIPS_HERE.bat.
 2. Drag your original video into the terminal and press Enter. You can also
    drop a clip directly onto the BAT in File Explorer.
@@ -27,7 +32,7 @@ HOW TO PROCESS A CLIP
      1 = No matte; let the model find the foreground.
      2 = A mask for the first frame.
      3 = A full matte video or image sequence covering the shot.
-   For a rough AE roto video, choose 3 and use matte trust 0.75 initially.
+   Matte confidence defaults to 0.75 for rough roto; use 0.95 for a clean mask.
    Leave authoritative matte mode off initially for a rough roto.
 6. Choose Video or EXR output. The Video cutout is a ProRes 4444 MOV with
    transparency. EXR is a scene-linear image sequence with RGBA for cutout.

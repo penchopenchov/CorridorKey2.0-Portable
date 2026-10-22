@@ -84,6 +84,11 @@ It also picks up companion hint files next to the input automatically
 (`<clip>FrameHint.png` for a first-frame hint, `<clip>_AlphaHint.mp4` for a
 full hint video).
 
+The Windows portable launcher accepts **b** or **back** at setup questions to
+return to the previous question. Previous answers become the defaults; Enter
+keeps them. Its final review offers Start, Back and Cancel, and matte confidence
+defaults to **0.75** (use 0.95 for a clean mask).
+
 You can also start the same guided session directly:
 
 ```
