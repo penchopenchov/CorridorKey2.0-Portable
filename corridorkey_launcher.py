@@ -49,6 +49,7 @@ class Settings:
     sequence_fps: float = 24.0
     output_root: Path | None = None
     cache_root: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / 'corridorkey_launcher')
+    preparation_threads: int = 0  # FFmpeg's automatic EXR encoder thread selection.
 
 
 @dataclass
@@ -174,6 +175,25 @@ def prompt_settings(*, has_sequences):
     if memory == 2:
         settings.low_vram = prompt_confirm('Enable low-VRAM mode?', default=True)
         settings.hann_chunk, settings.hann_stride = prompt_hann_window()
+    logical_cpus = os.cpu_count() or 1
+    preparation = prompt_choices('CPU preparation threads:', [
+        f'Auto - let FFmpeg choose ({logical_cpus} logical CPUs detected)',
+        'Manual - choose a thread count',
+        'Conservative - 2 EXR encoder threads (previous setting)',
+    ])
+    if preparation == 2:
+        def thread_count(text):
+            try:
+                value = int(text)
+                return value if 1 <= value <= logical_cpus else None
+            except ValueError:
+                return None
+        settings.preparation_threads = int(prompt_input(
+            f'EXR encoding threads [1-{logical_cpus}]', default=str(min(8, logical_cpus)),
+            validator=thread_count))
+    elif preparation == 3:
+        settings.preparation_threads = 2
+    print('Controls temporary video-to-EXR encoding. More threads can increase RAM use.')
     def frame_limit(text):
         if text.lower() == 'all':
             return -1
@@ -247,7 +267,7 @@ def video_metadata(path):
         reader.release()
 
 
-def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matte=False):
+def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matte=False, threads=0):
     with Progress('Reading media metadata', unit=None):
         fps, frame_count = video_metadata(source)
     total = min(frame_count, num_frames) if frame_count > 0 and num_frames > 0 else max(frame_count, num_frames, 0)
@@ -269,7 +289,7 @@ def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matt
                '-map', '0:v:0', '-an', '-sn', '-dn', '-vf', filters, '-fps_mode', 'passthrough']
     if num_frames > 0:
         command += ['-frames:v', str(num_frames)]
-    command += ['-c:v', 'exr', '-compression', 'zip16', '-threads', '2',
+    command += ['-c:v', 'exr', '-compression', 'zip16', '-threads', str(threads),
                 '-start_number', '0', str(destination / 'frame_%08d.exr')]
     with Progress('Decoding matte' if matte else 'Decoding source', total) as progress, tempfile.TemporaryFile() as error_log:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log,
@@ -353,7 +373,8 @@ def prepare_job(job, settings, ffmpeg):
                                        settings.sequence_fps, settings.num_frames)
         else:
             prepared = decode_video(job.input_path, work / 'input', settings.input_color,
-                                    settings.input_range, settings.num_frames, ffmpeg)
+                                    settings.input_range, settings.num_frames, ffmpeg,
+                                    threads=settings.preparation_threads)
         hint = job.hint
         if settings.hint_mode == 'full' and hint:
             if hint.is_file():
@@ -361,7 +382,7 @@ def prepare_job(job, settings, ffmpeg):
                 if abs(matte_fps - prepared.fps) > 0.001:
                     raise ValueError(f'Matte FPS {matte_fps:g} does not match source FPS {prepared.fps:g}.')
                 hint = decode_video(hint, work / 'matte', 'linear', 'auto', settings.num_frames,
-                                    ffmpeg, matte=True).path
+                                    ffmpeg, matte=True, threads=settings.preparation_threads).path
             source_count = len(image_files(prepared.path))
             if settings.num_frames > 0:
                 source_count = min(source_count, settings.num_frames)
@@ -450,6 +471,8 @@ def main(argv=None):
         print(f'Input color: {COLOR_LABELS[settings.input_color]} | Video levels: {settings.input_range}')
         print(f'Matte: {settings.hint_mode} | Output: {settings.output_format} | Files: {", ".join(settings.outputs)}')
         print('Cutout color: ' + ('Linear Rec.709' if settings.output_format == 'exr' or settings.cutout_linear else 'sRGB'))
+        thread_label = 'Auto (FFmpeg chooses)' if settings.preparation_threads == 0 else str(settings.preparation_threads)
+        print(f'CPU preparation threads: {thread_label}')
         print(f'Frames: {settings.num_frames if settings.num_frames > 0 else "all"} | Cache: {settings.cache_root}')
         print('Temporary float frames can use substantial disk space for long 4K clips.')
         for index, job in enumerate(jobs, 1):

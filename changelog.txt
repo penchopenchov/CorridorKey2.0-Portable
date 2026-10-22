@@ -491,3 +491,32 @@ Validation for this change (temporary verification files, not shipped tests):
   checks, not a production-footage quality or performance benchmark.
 - Independent read-only review found no remaining actionable issues after
   the narrow-terminal fix. Python syntax and git diff --check passed.
+
+CPU PREPARATION THREAD CONTROL - 2026-10-21
+
+- Created the local checkpoint-before-preparation-threads-2026-10-21 tag at
+  127f94d (the already-pushed progress/VRAM version) before changing source.
+- Added a launch-time CPU preparation threads menu. Auto is the default and
+  delegates EXR encoder thread selection to FFmpeg via -threads 0. Manual
+  accepts 1 through the detected logical CPU count; Conservative retains 2.
+- Applied the selected thread count to both source-video and full-matte-video
+  EXR encoding. The settings review displays it; launcher_settings.json saves
+  preparation_threads, with 0 representing Auto.
+- Performance optimization: the fork owner reported a significant speedup in
+  Decoding source after enabling Auto on an AMD Ryzen 7 3800X (16 logical
+  threads), compared with the previous fixed two-thread setting. The gain is
+  in source decoding/preparation, with unchanged precision and color handling.
+- Preserved source decoding/filter behavior, float precision, ZIP compression,
+  color transfer equations, inference and final-output encoding. This setting
+  is not a total process CPU-thread limit. GPU decoding was not added.
+
+Validation:
+- Five temporary behavioral checks passed for Auto/default persistence, manual
+  validation, Conservative mode, source/matte command routing and decode
+  equivalence. Float pixels were exactly equal across 2, Auto, 8 and 16 EXR
+  threads for Linear, sRGB and Rec.709 preparation; counts/FPS were preserved.
+- All eleven historical launcher regressions passed with the new Auto answer
+  added to the two menu fixtures. No permanent test directory was reintroduced.
+- Read-only code review found no actionable issues. Syntax and whitespace
+  checks passed. These checks establish sample decode equivalence; performance
+  improvement is user-confirmed; a numeric speedup has not been benchmarked.

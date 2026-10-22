@@ -39,7 +39,10 @@ HOW TO PROCESS A CLIP
 8. For video cutout, choose OUTPUT color separately: straight sRGB for standard
    editing, or straight linear Rec.709 for your linear compositing pipeline.
    EXR output is always linear. Keep despill at 0.5 initially.
-9. Keep GPU memory on Auto. For a first test, enter a frame limit of 24 or 48.
+9. Keep GPU memory on Auto. CPU preparation threads also default to Auto:
+   FFmpeg chooses how many threads encode the temporary EXR frames. Manual
+   lets you choose a count; Conservative uses the previous 2-thread setting.
+   For a first test, enter a frame limit of 24 or 48.
 10. Choose an output parent and a temporary-cache drive, or accept defaults.
     The default output is out_CLIPNAME beside the source clip. Long 4K shots
     need substantial temporary disk space for decoded float frames.
@@ -49,6 +52,11 @@ HOW TO PROCESS A CLIP
 Do not close the terminal until processing finishes. Import the cutout MOV
 into your editor; select Straight / Unmatted alpha if it asks. Keep your
 original audio in the editing timeline.
+
+Auto CPU preparation threading is a decoding-stage optimization: the fork
+owner reported significantly faster Decoding source on a 16-thread Ryzen
+7 3800X. It preserves float precision, lossless ZIP compression and color
+handling. The speedup depends on the footage, CPU and temporary-cache drive.
 
 The progress line shows the clip number, current stage, stage percentage,
 frames processed/total, elapsed time and estimated time remaining for that

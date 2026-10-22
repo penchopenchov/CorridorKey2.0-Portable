@@ -142,6 +142,25 @@ drive with enough room. Selected leading-frame limits reduce decode/model
 work. Job EXRs and low-VRAM feature files are cleaned after success, failure
 or cancellation. Output files remain at the chosen destination.
 
+CPU preparation threads default to Auto (FFmpeg's thread count 0). Manual
+accepts 1 through the detected logical CPU count; Conservative retains the
+previous 2-thread setting. The same selection applies to EXR encoding for
+source videos and full-matte videos. It is shown in the settings review and
+saved as preparation_threads in launcher_settings.json (0 means Auto).
+
+This controls the EXR encoder, not a hard limit on the process's total CPU
+threads. Source decoder and filter threading remain automatic. Image-sequence
+conversion, the later transfer-conversion pass, GPU inference and final-output
+encoders are unchanged. Float precision, ZIP compression and color equations
+are unchanged. More threads may help CPU-bound EXR encoding, at the cost of
+additional RAM; disk throughput or other processing can limit the speedup.
+Use Manual or Conservative if Auto uses more resources than desired.
+
+The fork owner confirmed a significant real-world speedup in Decoding source
+with Auto on an AMD Ryzen 7 3800X (16 logical threads), compared with the old
+two-thread setting. This is a CPU preparation optimization; no numeric speedup
+factor or inference-stage speedup is claimed.
+
 For a batch, input color/settings apply to all selected clips. Run sources
 with different transfers separately. Companion matte PNGs do not turn a video
 batch into an image sequence. Missing explicit masks reprompt; the launcher

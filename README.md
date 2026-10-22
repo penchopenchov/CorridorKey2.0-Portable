@@ -5,6 +5,18 @@
 > High reasoning). The underlying model and inference code is the original
 > upstream CorridorKey 2.0. Please review the code before use.
 
+## Faster Windows source preparation
+
+The Windows launcher now defaults to **Auto CPU preparation threads**, replacing
+the previous fixed two-thread limit for temporary EXR encoding. The fork owner
+reported a significant speedup in the **Decoding source** stage on an AMD Ryzen
+7 3800X (16 logical threads). This optimizes the decoding/preparation stage;
+the actual gain depends on the footage, CPU and cache drive.
+
+Float precision, lossless ZIP compression, color conversion and model settings
+are unchanged. You can also choose a manual thread count or **Conservative**
+to restore the previous two-thread setting at launch.
+
 Welcome to CorridorKey 2.0! You may rest easy, weary artist. The green beast has been slain. The CorridorKey 2.0 model was designed and trained by Zachary Harris, in direct collaboration with Niko and Corridor Digital.
 
 # Check out our official plugin!
