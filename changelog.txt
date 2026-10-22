@@ -546,3 +546,42 @@ Validation (temporary files only):
 - Eleven historical launcher regressions passed, including real FFmpeg MP4
   and ProRes decoding/precision checks. Menu fixtures retain the Auto CPU
   answer introduced in the preceding update.
+
+OWNED TEMPORARY CACHE CLEANUP - 2026-10-22
+
+- Created checkpoint-before-cache-cleanup-2026-10-22 at c5a8047 before editing.
+- Removed four inspected, abandoned legacy job caches (about 367 GiB) from
+  the Windows user Temp/corridorkey_launcher folder after rechecking that no
+  associated launcher, decoder or inference process was running.
+- Added cli_cache.py. Each new temporary job directory has ownership metadata
+  and an exclusive OS lease stored outside its data tree. Decoder and inference
+  children inherit the lease, preserving active cache ownership if the launcher
+  is forcibly closed. Deletion always requires acquiring exclusive ownership,
+  including during normal cleanup and cancellation at the subprocess handoff.
+- Remove owned temporary frames/features after job completion, errors or
+  cancellation. Briefly retry transient deletion failures, then warn with the
+  retained path without masking processing errors. Sidecar records survive
+  partial deletion so future recovery can finish the cleanup.
+- Recover abandoned registered caches in the default root when the portable
+  launcher starts; check a selected custom root before processing. Skip active
+  leases, unknown directories, invalid ownership markers and linked job paths.
+  Source media, exports, model assets and unrelated Temp files are untouched.
+- Hardened inference-worker teardown to terminate/reap the worker on any wait
+  exception before cache cleanup. Decoder teardown already handles exceptions.
+- No nightly task is installed. Forced closures can retain temporary files
+  until a later launch after the processing children exit. Old unregistered
+  cache folders are not automatically deleted. Direct infer.py retains its
+  upstream cache behavior; model/runtime code is unchanged.
+
+Validation (temporary verification files only):
+- Seventeen cache/lifecycle checks passed, including real Windows inherited
+  handle protection after abrupt launcher death, an interrupt during child
+  creation, normal/error/cancel cleanup, active-child preservation, partial and
+  locked-file deletion recovery, startup recovery, source/output preservation,
+  marker validation and Windows junction protection. Actual FFmpeg decoding
+  and a real subprocess writing feature-cache/output fixtures were exercised.
+- Eleven historical launcher regressions passed, including MP4/OpenEXR fresh
+  processes and ProRes precision/FPS checks. No GPU inference benchmark was
+  needed for this cache-lifecycle change.
+- Independent review reproduced and verified the child-handoff cancellation
+  fix and found no remaining important issues.

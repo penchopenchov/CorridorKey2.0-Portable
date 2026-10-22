@@ -13,6 +13,7 @@ import tempfile
 
 from cli_progress import Progress, progress_job
 from cli_menu import SetupMenu
+from cli_cache import JobCache, cache_popen, cleanup_abandoned
 
 # Video metadata probing imports OpenCV before decoded float EXRs are read.
 # OpenCV caches this option when it loads, so configure it at process startup.
@@ -309,7 +310,7 @@ def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matt
     command += ['-c:v', 'exr', '-compression', 'zip16', '-threads', str(threads),
                 '-start_number', '0', str(destination / 'frame_%08d.exr')]
     with Progress('Decoding matte' if matte else 'Decoding source', total) as progress, tempfile.TemporaryFile() as error_log:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log,
+        process = cache_popen(command, stdout=subprocess.PIPE, stderr=error_log,
                                    text=True, encoding='utf-8', errors='replace')
         try:
             for line in process.stdout:
@@ -379,10 +380,8 @@ def decode_sequence(source, destination, color, fps, num_frames):
 
 @contextmanager
 def prepare_job(job, settings, ffmpeg):
-    settings.cache_root.mkdir(parents=True, exist_ok=True)
-    temporary = tempfile.TemporaryDirectory(prefix='job_', dir=settings.cache_root)
-    try:
-        work = Path(temporary.name) / job.source.stem
+    with JobCache(settings.cache_root) as temporary:
+        work = temporary.path / job.source.stem
         work.mkdir()
         print(f'Decoding {job.source.name} as {COLOR_LABELS[settings.input_color]} ...', flush=True)
         if job.input_path.is_dir():
@@ -406,9 +405,6 @@ def prepare_job(job, settings, ffmpeg):
             if len(image_files(hint)) < source_count:
                 raise ValueError('The full matte has fewer frames than the selected source segment.')
         yield prepared, hint, work / 'features'
-    finally:
-        with Progress('Cleaning temporary cache', unit=None):
-            temporary.cleanup()
 
 
 def inference_command(prepared, hint, output_dir, settings, ffmpeg, feature_cache=None):
@@ -451,16 +447,17 @@ def run_job(job, settings, ffmpeg):
         print(f'Processing -> {destination}', flush=True)
         environment = os.environ.copy()
         environment.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', PYTHONUNBUFFERED='1')
-        process = subprocess.Popen(command, cwd=ROOT, env=environment)
+        process = cache_popen(command, cwd=ROOT, env=environment)
         try:
             result = process.wait()
-        except KeyboardInterrupt:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
             raise
         if result:
             raise RuntimeError(f'Inference failed (exit {result}). See the console output above.')
@@ -496,6 +493,15 @@ def prompt_run(paths, menu):
     return (jobs, settings) if menu.review() else None
 
 
+def recover_caches(cache_root):
+    with Progress('Checking abandoned caches', unit=None):
+        result = cleanup_abandoned(cache_root)
+    if result.removed:
+        print(f'Removed {result.removed} abandoned temporary job cache(s).')
+    if result.active:
+        print(f'Kept {result.active} active temporary job cache(s).')
+
+
 def main(argv=None):
     if os.name == 'nt':
         os.system('')
@@ -507,12 +513,16 @@ def main(argv=None):
         ffmpeg = ROOT / 'ffmpeg.exe' if (ROOT / 'ffmpeg.exe').is_file() else shutil.which('ffmpeg')
         if not ffmpeg:
             raise ValueError('FFmpeg is missing. Restore ffmpeg.exe in the installation folder.')
+        default_cache = Settings().cache_root
+        recover_caches(default_cache)
         print('Setup: type b or back to revisit the previous question. Enter keeps the displayed default.')
         configured = SetupMenu().run(lambda menu: prompt_run(paths, menu))
         if configured is None:
             print('Canceled. No clips processed.')
             return 0
         jobs, settings = configured
+        if settings.cache_root.resolve() != default_cache.resolve():
+            recover_caches(settings.cache_root)
         for index, job in enumerate(jobs, 1):
             print_header(f'Clip {index}/{len(jobs)}: {job.source.name}')
             with progress_job(f'{index}/{len(jobs)}'):
@@ -520,7 +530,7 @@ def main(argv=None):
         print_header('All selected clips completed')
         return 0
     except KeyboardInterrupt:
-        print('\nCanceled by user. Temporary decoded frames have been removed.')
+        print('\nCanceled by user. Check the cache-cleanup messages above for any retained files.')
         return 130
     except (ValueError, RuntimeError, OSError) as error:
         print(f'\nERROR: {error}')

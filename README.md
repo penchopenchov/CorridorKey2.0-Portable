@@ -89,6 +89,12 @@ return to the previous question. Previous answers become the defaults; Enter
 keeps them. Its final review offers Start, Back and Cancel, and matte confidence
 defaults to **0.75** (use 0.95 for a clean mask).
 
+The Windows portable launcher removes its temporary job cache after processing.
+At startup it also recovers abandoned caches created by this version; a custom
+cache root is checked before processing. Active decoder/inference jobs hold an
+inherited OS lease and are skipped, even after their launcher closes. Failed
+deletions show the retained path and are retried on a later launch.
+
 You can also start the same guided session directly:
 
 ```

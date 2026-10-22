@@ -58,6 +58,21 @@ Do not close the terminal until processing finishes. Import the cutout MOV
 into your editor; select Straight / Unmatted alpha if it asks. Keep your
 original audio in the editing timeline.
 
+TEMPORARY CACHE CLEANUP
+
+The launcher removes its decoded frames and feature caches after each job,
+including failures and Ctrl+C cancellation. A forced window close or power
+loss can prevent immediate cleanup; the next launch recovers abandoned caches
+in the default cache folder. A selected custom cache folder is checked before
+processing starts. Active jobs are skipped, including a decoder or inference
+worker still running after its launcher was closed.
+
+If deletion fails, the launcher prints the retained path and retries it on a
+later launch. Only caches registered by this version are eligible for recovery;
+unrecognized folders, source footage, exports and model assets are left alone.
+No nightly task is required. Large temporary caches are still needed DURING
+processing; choose a cache drive with enough free space for long shots.
+
 Auto CPU preparation threading is a decoding-stage optimization: the fork
 owner reported significantly faster Decoding source on a 16-thread Ryzen
 7 3800X. It preserves float precision, lossless ZIP compression and color

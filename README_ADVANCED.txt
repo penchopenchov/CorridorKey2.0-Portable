@@ -176,6 +176,31 @@ source/matte, selected settings, FPS and the executed model command.
 
 6. COMMAND LINE
 
+PORTABLE CACHE OWNERSHIP AND RECOVERY
+
+The guided launcher creates a unique job_<uuid> folder in the selected cache
+root. Ownership records and small lock files live in .corridorkey-jobs beside
+the job folders, so an interrupted/partial deletion remains recoverable.
+The default root is %TEMP%\corridorkey_launcher.
+
+Each job holds an exclusive OS lease. Decoder and inference subprocesses
+inherit that lease, keeping the cache protected even if their launcher dies.
+Recovery must acquire the same exclusive lease before deleting a registered
+job folder. Active jobs, unknown folders, invalid ownership records and linked
+job directories are never swept. Cleanup is scoped to temporary caches owned
+by this launcher, not the full Windows Temp folder or output/model folders.
+
+Cleanup runs after each job, including ordinary errors and cancellation. It
+briefly retries transient deletion failures and warns with the retained path
+if it still cannot remove files. Recovery checks the default root at startup
+and a selected custom root before processing. A forced termination may leave
+files until the next launch after all processing children have exited. The
+launcher does not install a nightly scheduled task.
+
+This management applies to the portable launcher. Direct infer.py retains
+its existing feature-file cleanup behavior. Old unregistered cache folders
+require separate inspection; they are not automatically assumed safe to delete.
+
 PROGRESS REPORTING
 
 The guided launcher and direct infer.py both report stage progress. The
