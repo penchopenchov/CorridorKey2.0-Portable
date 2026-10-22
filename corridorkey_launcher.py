@@ -1,0 +1,443 @@
+"""Guided Windows launcher with explicit input color and matte selection."""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+# Video metadata probing imports OpenCV before decoded float EXRs are read.
+# OpenCV caches this option when it loads, so configure it at process startup.
+# EXR support is required by this launcher's high-precision preparation path.
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
+
+from run_interactive import (
+    clean_path, find_first_frame_hint,
+    print_header, prompt_choices, prompt_confirm, prompt_hann_window, prompt_input,
+)
+
+ROOT = Path(__file__).resolve().parent
+VIDEO_EXTENSIONS = {'.mov', '.mp4', '.mkv', '.avi', '.webm', '.mxf'}
+IMAGE_EXTENSIONS = {'.exr', '.png', '.jpg', '.jpeg'}
+COLOR_LABELS = {'srgb': 'sRGB', 'rec709': 'Rec.709 (BT.709 transfer)',
+                'linear': 'Linear Rec.709 (gamma 1.0)'}
+
+
+@dataclass
+class Settings:
+    input_color: str = 'srgb'
+    input_range: str = 'auto'
+    hint_mode: str = 'none'
+    hint_quality: float = 0.95
+    authoritative: bool = False
+    output_format: str = 'video'
+    exr_dtype: str = 'half'
+    outputs: tuple[str, ...] = ('alpha', 'fg', 'cutout', 'checker')
+    cutout_linear: bool = False
+    despill_strength: float = 0.5
+    low_vram: bool = False
+    hann_chunk: int | None = None
+    hann_stride: int | None = None
+    num_frames: int = -1
+    sequence_fps: float = 24.0
+    output_root: Path | None = None
+    cache_root: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / 'corridorkey_launcher')
+
+
+@dataclass
+class Job:
+    source: Path
+    input_path: Path
+    hint: Path | None = None
+
+
+@dataclass
+class PreparedMedia:
+    path: Path
+    fps: float
+
+
+def image_files(folder):
+    return sorted(p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
+
+
+def sequence_folder(folder):
+    folder = Path(folder)
+    for child in folder.iterdir():
+        if child.is_dir() and child.name.lower() == 'input' and image_files(child):
+            return child
+    # A batch folder can contain companion mask PNGs beside its source clips.
+    if image_files(folder) and not any(p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS for p in folder.iterdir()):
+        return folder
+    return None
+
+
+def collect_jobs(paths):
+    jobs = []
+    for path in paths:
+        path = Path(path).resolve()
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
+            jobs.append(Job(path, path))
+        elif path.is_dir():
+            sequence = sequence_folder(path)
+            if sequence:
+                jobs.append(Job(path, sequence))
+            else:
+                children = [p for p in sorted(path.iterdir())
+                            if (p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+                                and '_alphahint' not in p.stem.lower())
+                            or (p.is_dir() and sequence_folder(p))]
+                jobs.extend(collect_jobs(children))
+        else:
+            raise ValueError(f'Unsupported or missing input: {path}')
+    if not jobs:
+        raise ValueError('No supported clips or image sequences found.')
+    # Avoid processing the same clip twice when both it and its folder were dropped.
+    return list({job.input_path: job for job in jobs}.values())
+
+
+def bounded_float(text, lower=0.0, upper=1.0):
+    try:
+        value = float(text)
+        return value if lower <= value <= upper else None
+    except ValueError:
+        return None
+
+
+def prompt_settings(*, has_sequences):
+    settings = Settings()
+    print_header('Input color - how the SOURCE RGB values are encoded')
+    color = prompt_choices('Choose source color:', [
+        'sRGB (standard images / sRGB-encoded video)',
+        'Rec.709 (BT.709 transfer, non-linear)',
+        'Linear Rec.709 / gamma 1.0 (including linear ProRes 4444)',
+    ])
+    settings.input_color = ('srgb', 'rec709', 'linear')[color - 1]
+    print('ProRes 4444 is a codec; choose the transfer used when the clip was exported.')
+    levels = prompt_choices('Video data levels (ignored for image sequences):', [
+        'Auto - use decoded video range metadata', 'Limited / video / TV levels', 'Full / data / PC levels',
+    ])
+    settings.input_range = ('auto', 'limited', 'full')[levels - 1]
+    if has_sequences:
+        settings.sequence_fps = float(prompt_input('Image sequence frame rate', default='24',
+                                                   validator=lambda x: bounded_float(x, 0.001, 1000)))
+    print_header('Matte / subject guidance')
+    matte = prompt_choices('What matte do you have?', [
+        'No matte - let the model choose the foreground',
+        'First-frame matte - a mask image for the first frame',
+        'Full matte - a matching matte video or image sequence',
+    ])
+    settings.hint_mode = ('none', 'first', 'full')[matte - 1]
+    if settings.hint_mode != 'none':
+        settings.hint_quality = float(prompt_input('Matte trust: 0.95 clean / 0.75 rough',
+                                                   default='0.95', validator=bounded_float))
+        if settings.hint_mode == 'full':
+            settings.authoritative = prompt_confirm('Use the supplied matte on every frame (disable carried predictions)?', default=False)
+    print_header('Exports')
+    output = prompt_choices('Output format:', [
+        'Video - ProRes 4444 cutout with alpha, plus H.264 previews',
+        'EXR sequences - scene-linear HDR, cutout includes RGBA',
+    ])
+    settings.output_format = ('video', 'exr')[output - 1]
+    if settings.output_format == 'exr':
+        precision = prompt_choices('EXR precision:', ['Half float (16-bit)', 'Full float (32-bit)'])
+        settings.exr_dtype = ('half', 'float')[precision - 1]
+    names = ('alpha', 'fg', 'cutout', 'checker')
+    print('1) Alpha matte  2) Foreground RGB  3) Transparent cutout  4) Checker preview')
+    while True:
+        answer = input('Outputs: enter numbers separated by spaces [Enter = all four]: ').strip()
+        try:
+            indices = list(dict.fromkeys(int(n) for n in answer.replace(',', ' ').split())) if answer else [1, 2, 3, 4]
+            if not indices or any(n < 1 or n > 4 for n in indices):
+                raise ValueError
+            settings.outputs = tuple(names[n - 1] for n in indices)
+            break
+        except ValueError:
+            print('Choose only output numbers 1 through 4.')
+    if settings.output_format == 'video' and 'cutout' in settings.outputs:
+        color = prompt_choices('OUTPUT cutout color (independent of source color):', [
+            'Straight sRGB RGB + linear alpha (standard editing)',
+            'Straight linear Rec.709 RGB + linear alpha',
+        ])
+        settings.cutout_linear = color == 2
+    if {'checker', 'cutout'}.intersection(settings.outputs):
+        settings.despill_strength = float(prompt_input('Despill strength [0 = none, 1 = full]',
+                                                       default='0.5', validator=bounded_float))
+    memory = prompt_choices('GPU memory:', ['Auto - choose settings from free VRAM', 'Manual - low VRAM / temporal window'])
+    if memory == 2:
+        settings.low_vram = prompt_confirm('Enable low-VRAM mode?', default=True)
+        settings.hann_chunk, settings.hann_stride = prompt_hann_window()
+    def frame_limit(text):
+        if text.lower() == 'all':
+            return -1
+        try:
+            value = int(text)
+            return value if value > 0 else None
+        except ValueError:
+            return None
+    limit = prompt_input('Process first N frames, or all', default='all', validator=frame_limit)
+    settings.num_frames = -1 if str(limit).lower() == 'all' else int(limit)
+    destination = prompt_input('Output parent folder [default: beside each source]', default='')
+    settings.output_root = Path(clean_path(destination)) if destination else None
+    print('High-precision decoding uses temporary float EXRs, removed after each job.')
+    cache = prompt_input(f'Temporary cache folder [default: {settings.cache_root}]', default='')
+    if cache:
+        settings.cache_root = Path(clean_path(cache))
+    return settings
+
+
+def resolve_hint(job, mode):
+    if mode == 'none':
+        return None
+    if mode == 'first':
+        candidate = find_first_frame_hint(job.source)
+    else:
+        candidate = next((p for p in sorted(job.source.parent.iterdir())
+                          if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+                          and p.stem.lower().startswith(job.source.stem.lower() + '_alphahint')), None)
+    if mode == 'full' and job.source.is_dir():
+        candidate = next((p for p in job.source.iterdir() if p.is_dir() and p.name.lower() == 'alphahint'), candidate)
+    if candidate and (mode == 'full' or candidate.suffix.lower() in IMAGE_EXTENSIONS):
+        if prompt_confirm(f'Use companion matte for {job.source.name}: {candidate}?', default=True):
+            return Path(candidate)
+    while True:
+        kind = 'first-frame matte image / folder' if mode == 'first' else 'full matte video / frame folder'
+        answer = input(f'Drag the {kind} for {job.source.name} here: ').strip()
+        if answer:
+            path = Path(clean_path(answer))
+            valid_dir = path.is_dir() and bool(image_files(path))
+            valid_file = path.is_file() and path.suffix.lower() in (
+                IMAGE_EXTENSIONS if mode == 'first' else VIDEO_EXTENSIONS)
+            if valid_dir or valid_file:
+                return path
+        print('Matte path is missing or unsupported. Supply an existing mask; Ctrl+C cancels.')
+
+
+def decode_transfer(values, color):
+    import numpy as np
+    if color == 'linear':
+        return values
+    magnitude = np.abs(values)
+    if color == 'srgb':
+        decoded = np.where(magnitude <= 0.04045, magnitude / 12.92, ((magnitude + 0.055) / 1.055) ** 2.4)
+    elif color == 'rec709':
+        decoded = np.where(magnitude < 0.081, magnitude / 4.5, ((magnitude + 0.099) / 1.099) ** (1 / 0.45))
+    else:
+        raise ValueError(f'Unknown input color: {color}')
+    return np.sign(values) * decoded
+
+
+def video_metadata(path):
+    import cv2
+    reader = cv2.VideoCapture(str(path))
+    try:
+        fps = reader.get(cv2.CAP_PROP_FPS)
+        count = int(reader.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not reader.isOpened() or not 0 < fps < 1000:
+            raise ValueError(f'Cannot determine video frame rate: {path}')
+        return fps, count
+    finally:
+        reader.release()
+
+
+def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matte=False):
+    fps, _ = video_metadata(source)
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    if matte:
+        # A matte is coverage, so no gamma/transfer conversion is applied.
+        filters = 'format=grayf32le'
+    else:
+        # Decode code values to float RGB without an EOTF. zimg interprets BT.709
+        # through a display EOTF, which differs from the inverse OETF selected in
+        # our menu. Use the same explicit transfer equations as image sequences.
+        filters = 'zscale=matrixin=709:primariesin=709:transferin=linear:matrix=gbr:primaries=709:transfer=linear:range=full'
+        if levels != 'auto':
+            filters += f':rangein={levels}'
+        filters += ',format=gbrpf32le'
+    command = [str(ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', str(source),
+               '-map', '0:v:0', '-an', '-sn', '-dn', '-vf', filters, '-fps_mode', 'passthrough']
+    if num_frames > 0:
+        command += ['-frames:v', str(num_frames)]
+    command += ['-c:v', 'exr', '-compression', 'zip16', '-threads', '2',
+                '-start_number', '0', str(destination / 'frame_%08d.exr')]
+    result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if result.returncode:
+        raise RuntimeError(f'Could not decode {source}:\n{result.stderr.strip()}')
+    if not image_files(destination):
+        raise RuntimeError(f'Video produced no decoded frames: {source}')
+    if not matte and color != 'linear':
+        import cv2
+        for path in image_files(destination):
+            values = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            if values is None or not cv2.imwrite(str(path), decode_transfer(values, color)):
+                raise RuntimeError(f'Could not linearize decoded frame: {path}')
+    return PreparedMedia(destination, fps)
+
+
+def decode_sequence(source, destination, color, fps, num_frames):
+    import cv2
+    import numpy as np
+    frames = image_files(source)
+    if num_frames > 0:
+        frames = frames[:num_frames]
+    if not frames:
+        raise ValueError(f'No supported frames: {source}')
+    if color == 'linear' and all(p.suffix.lower() == '.exr' for p in frames):
+        return PreparedMedia(Path(source), fps)
+    destination.mkdir(parents=True, exist_ok=True)
+    for index, path in enumerate(frames):
+        raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if raw is None:
+            raise ValueError(f'Cannot read image: {path}')
+        values = raw.astype(np.float32)
+        if np.issubdtype(raw.dtype, np.integer):
+            values /= np.iinfo(raw.dtype).max
+        if values.ndim == 2:
+            values = np.repeat(values[:, :, None], 3, axis=2)
+        values = decode_transfer(values[:, :, :3], color)
+        if not cv2.imwrite(str(destination / f'frame_{index:08d}.exr'), values):
+            raise RuntimeError(f'Could not write decoded image: {path}')
+    return PreparedMedia(destination, fps)
+
+
+@contextmanager
+def prepare_job(job, settings, ffmpeg):
+    settings.cache_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='job_', dir=settings.cache_root) as temporary:
+        work = Path(temporary) / job.source.stem
+        work.mkdir()
+        print(f'Decoding {job.source.name} as {COLOR_LABELS[settings.input_color]} ...', flush=True)
+        if job.input_path.is_dir():
+            prepared = decode_sequence(job.input_path, work / 'input', settings.input_color,
+                                       settings.sequence_fps, settings.num_frames)
+        else:
+            prepared = decode_video(job.input_path, work / 'input', settings.input_color,
+                                    settings.input_range, settings.num_frames, ffmpeg)
+        hint = job.hint
+        if settings.hint_mode == 'full' and hint:
+            if hint.is_file():
+                matte_fps, _ = video_metadata(hint)
+                if abs(matte_fps - prepared.fps) > 0.001:
+                    raise ValueError(f'Matte FPS {matte_fps:g} does not match source FPS {prepared.fps:g}.')
+                hint = decode_video(hint, work / 'matte', 'linear', 'auto', settings.num_frames,
+                                    ffmpeg, matte=True).path
+            source_count = len(image_files(prepared.path))
+            if settings.num_frames > 0:
+                source_count = min(source_count, settings.num_frames)
+            if len(image_files(hint)) < source_count:
+                raise ValueError('The full matte has fewer frames than the selected source segment.')
+        yield prepared, hint, work / 'features'
+
+
+def inference_command(prepared, hint, output_dir, settings, ffmpeg, feature_cache=None):
+    command = [sys.executable, str(ROOT / 'infer.py'), '--input', str(prepared.path),
+               '--output_dir', str(output_dir), '--frame_dir_linear', '--frame_dir_fps', str(prepared.fps),
+               '--ffmpeg_bin', str(ffmpeg), '--output_format', settings.output_format,
+               '--exr_dtype', settings.exr_dtype, '--despill_strength', str(settings.despill_strength),
+               '--outputs', *settings.outputs]
+    if hint and settings.hint_mode != 'none':
+        command += ['--hint_first_frame' if settings.hint_mode == 'first' else '--hint_video', str(hint),
+                    '--hint_quality', str(settings.hint_quality)]
+        if settings.authoritative:
+            command.append('--no_carry_hint')
+    if settings.cutout_linear:
+        command.append('--cutout_linear')
+    if settings.low_vram:
+        command.append('--low_vram')
+    if feature_cache:
+        command += ['--temp_dir', str(feature_cache)]
+    if settings.hann_chunk is not None:
+        command += ['--hann_chunk', str(settings.hann_chunk), '--hann_stride', str(settings.hann_stride)]
+    if settings.num_frames > 0:
+        command += ['--num_frames', str(settings.num_frames)]
+    return command
+
+
+def output_folder(job, settings):
+    parent = settings.output_root or job.source.parent
+    return parent / f'out_{job.source.stem}'
+
+
+def run_job(job, settings, ffmpeg):
+    destination = output_folder(job, settings)
+    destination.mkdir(parents=True, exist_ok=True)
+    with prepare_job(job, settings, ffmpeg) as (prepared, hint, feature_cache):
+        command = inference_command(prepared, hint, destination, settings, ffmpeg, feature_cache)
+        record = {'source': str(job.source), 'matte': str(job.hint) if job.hint else None,
+                  'settings': asdict(settings), 'fps': prepared.fps, 'command': command}
+        (destination / 'launcher_settings.json').write_text(json.dumps(record, indent=2, default=str) + '\n', encoding='utf-8')
+        print(f'Processing -> {destination}', flush=True)
+        environment = os.environ.copy()
+        environment.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', PYTHONUNBUFFERED='1')
+        process = subprocess.Popen(command, cwd=ROOT, env=environment)
+        try:
+            result = process.wait()
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+        if result:
+            raise RuntimeError(f'Inference failed (exit {result}). See the console output above.')
+    print(f'Finished: {destination}', flush=True)
+
+
+def main(argv=None):
+    if os.name == 'nt':
+        os.system('')
+    print_header('CorridorKey 2.0 - guided color and matte setup')
+    try:
+        paths = sys.argv[1:] if argv is None else argv
+        if not paths:
+            paths = [input('Drag a video, frame folder, or folder of clips here, then press Enter:\n').strip()]
+        if not all(path.strip() for path in paths):
+            raise ValueError('No input selected.')
+        jobs = collect_jobs([Path(clean_path(path)) for path in paths])
+        settings = prompt_settings(has_sequences=any(job.input_path.is_dir() for job in jobs))
+        for job in jobs:
+            job.hint = resolve_hint(job, settings.hint_mode)
+        ffmpeg = ROOT / 'ffmpeg.exe' if (ROOT / 'ffmpeg.exe').is_file() else shutil.which('ffmpeg')
+        if not ffmpeg:
+            raise ValueError('FFmpeg is missing. Restore ffmpeg.exe in the installation folder.')
+        print_header('Review settings')
+        print(f'Input color: {COLOR_LABELS[settings.input_color]} | Video levels: {settings.input_range}')
+        print(f'Matte: {settings.hint_mode} | Output: {settings.output_format} | Files: {", ".join(settings.outputs)}')
+        print('Cutout color: ' + ('Linear Rec.709' if settings.output_format == 'exr' or settings.cutout_linear else 'sRGB'))
+        print(f'Frames: {settings.num_frames if settings.num_frames > 0 else "all"} | Cache: {settings.cache_root}')
+        print('Temporary float frames can use substantial disk space for long 4K clips.')
+        for index, job in enumerate(jobs, 1):
+            print(f'{index}. {job.source} -> {output_folder(job, settings)}')
+            if job.hint:
+                print(f'   Matte: {job.hint}')
+        destinations = [output_folder(job, settings).resolve() for job in jobs]
+        if len(set(destinations)) != len(destinations):
+            raise ValueError('Two inputs map to the same output folder. Process them separately or rename them.')
+        if any(folder.exists() and any(folder.iterdir()) for folder in destinations):
+            print('Existing output folders may contain files that this run will overwrite.')
+        if not prompt_confirm('Start processing with these settings?', default=True):
+            print('Canceled. No clips processed.')
+            return 0
+        for index, job in enumerate(jobs, 1):
+            print_header(f'Clip {index}/{len(jobs)}: {job.source.name}')
+            run_job(job, settings, ffmpeg)
+        print_header('All selected clips completed')
+        return 0
+    except KeyboardInterrupt:
+        print('\nCanceled by user. Temporary decoded frames have been removed.')
+        return 130
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f'\nERROR: {error}')
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

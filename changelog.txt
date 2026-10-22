@@ -1,0 +1,424 @@
+CORRIDORKEY 2.0 - DETAILED LOCAL CHANGELOG
+=======================================
+Date: 2026-10-21
+Upstream: https://github.com/nikopueringer/CorridorKey2.0
+Baseline Git revision: 485f5e9ab759ead6138cc990776184b59d6ea971
+
+Note: The changes documented here were developed with AI assistance
+(GPT-6.1 Sol, High reasoning). The fork commit intentionally excludes
+AI_AGENT_INSTRUCTIONS.txt and AGENT_HANDOFF/ (agent-internal handoff
+material); references to them below describe the local portable package.
+
+PURPOSE
+
+Provide a menu-driven Windows BAT workflow for explicitly selected source
+color, including linear Rec.709 ProRes 4444, optional subject mattes, output
+formats and color, and GPU/cache/output settings. Package the local installation
+with a relocatable Python runtime so a complete installed-folder copy can run
+on another compatible Windows x64 NVIDIA PC.
+
+SOURCE FILES TO INCLUDE IN THE FORK COMMIT
+
+1. CorridorKey_DRAG_CLIPS_HERE.bat (modified)
+2. corridorkey_launcher.py (new)
+3. tools/make_portable.ps1 (new)
+4. tests/test_launcher.py (new)
+5. PORTABLE_README.txt (new)
+6. changelog.txt (this new file)
+7. .gitignore (modified)
+8. README.txt (new simple portable guide)
+9. README_ADVANCED.txt (new detailed portable guide)
+
+Suggested commit title:
+Add color-aware Windows launcher and portable Python packaging
+
+No commit or push was performed by this installation task. Review the source
+diff and stage the explicit files above. The working tree also contains local
+installation assets and smoke-test outputs; they are not source changes.
+
+BAT ENTRY POINT
+
+- Adds setlocal so PATH/Python environment changes stay inside this invocation.
+- Sets the working directory from the BAT's own location, supporting folder
+  names with spaces and launching from a different working directory.
+- Adds the application folder and optional venv Scripts folder to process PATH
+  so the bundled ffmpeg.exe is available to child processes.
+- Sets PYTHONUTF8=1 and PYTHONUNBUFFERED=1 for paths/logging and timely progress.
+- Prefers runtime/python.exe from the portable payload.
+- Falls back to venv/Scripts/python.exe for conventional source installations.
+- Reports a missing interpreter instead of silently using an unrelated system
+  Python with missing dependencies or an incompatible version.
+- Invokes corridorkey_launcher.py and forwards dropped arguments with %*.
+- Retains the final pause so errors/results stay visible.
+- Captures the launcher's exit code before pause and returns that code.
+
+NEW GUIDED LAUNCHER
+
+corridorkey_launcher.py reuses the upstream terminal prompt and companion-mask
+helpers from run_interactive.py. It adds typed Settings, Job and PreparedMedia
+records and handles selection, preparation and subprocess execution. It does
+not modify the model architecture, inference math or downloaded checkpoints.
+
+Input selection:
+- Accepts a dropped video, a frame folder, a folder with an Input subfolder,
+  a batch folder, or multiple explicit dropped inputs.
+- Video extensions: MOV, MP4, MKV, AVI, WEBM and MXF.
+- Frame extensions: EXR, PNG, JPG and JPEG.
+- Deduplicates repeated input paths.
+- Distinguishes a batch folder containing source videos and companion matte
+  PNGs from an actual frame sequence. A companion image is not processed as the
+  source in place of the video.
+- Excludes conventional _AlphaHint videos from implicit batch source lists.
+
+Input color and levels:
+- Menu choice 1: sRGB.
+- Menu choice 2: Rec.709 using the inverse BT.709 opto-electronic transfer.
+- Menu choice 3: Linear Rec.709, gamma 1.0, including linear ProRes 4444.
+- Offers Auto, Limited/video/TV and Full/data/PC video-range choices.
+- Explicit input color overrides ambiguous video transfer metadata. ProRes
+  4444 is a codec/container choice, not proof of a particular transfer function.
+- The Rec.709 option is inverse BT.709, not a generic gamma-2.4/BT.1886 mode.
+
+High-precision video preparation:
+- Uses OpenCV only to probe source FPS/count; it does not use OpenCV's 8-bit
+  video-frame reader to feed the model in this launcher.
+- FFmpeg decodes the first video stream through a BT.709 YUV-to-RGB matrix
+  into planar float RGB and compressed float EXR frames.
+- The zscale transfer is held linear on both sides during this matrix/range
+  decode, deliberately avoiding a zimg display-EOTF interpretation of BT.709.
+- Explicit source transfer equations are then applied once to the float RGB
+  for sRGB or Rec.709. Linear Rec.709 gets no additional transfer conversion.
+- Uses signed sRGB and BT.709 transfer equations for finite negative values.
+- The same equations are used for source frame sequences, ensuring consistency
+  between video and sequence inputs.
+- Preserves native frame dimensions, ordering and probed fractional FPS.
+- Frame limits decode only the selected leading N frames; all is the default.
+- Discards source audio/subtitles/data for inference; original audio remains
+  the editor's responsibility.
+- Passes prepared frames via --frame_dir_linear and --frame_dir_fps into the
+  existing infer.py frame-directory path, so the runtime does not gamma-decode
+  already-linear values a second time.
+- Integer frame sources are normalized from their native dtype. Linear EXR
+  sequences can use the source frames directly without a redundant conversion.
+
+Matte selection:
+- No matte: ignores companion masks and leaves subject selection to the model.
+- First-frame matte: accepts an existing image or frame directory.
+- Full matte: accepts an existing grayscale coverage video or frame directory.
+- Uses white for subject coverage and black for background; image alpha can
+  supply first-frame coverage through the upstream hint loader.
+- Offers explicit matte trust, with 0.95 default for a clean mask and 0.75
+  described as appropriate for a rough automated mask.
+- Full matte mode offers authoritative per-frame hints, routed to
+  --no_carry_hint. Otherwise the existing carried-prediction defaults apply.
+- Discovers first-frame companions such as shotFrameHint.png and full-video
+  companions such as shot_AlphaHint.mov/mp4, then asks before using them.
+- A still-image companion is not silently accepted as a full matte video.
+- Supports an AlphaHint companion folder for structured frame inputs.
+- Missing or unsupported explicit matte paths are reprompted. The launcher
+  does not silently fall back to no-matte inference.
+- Full matte videos are decoded to float grayscale EXR coverage without a
+  gamma transform. Checks video FPS against source FPS and checks that enough
+  mask frames exist for the selected segment.
+- An existing alpha channel in the SOURCE VIDEO is not automatically treated
+  as a matte. The three selections describe separately supplied guidance.
+
+Export choices:
+- Video: ProRes 4444 transparent cutout plus selected H.264 alpha/foreground/
+  checker previews, using the existing runtime writers.
+- EXR: linear HDR image sequences, with half or full float selection.
+- Select any combination of alpha, fg, cutout and checker; defaults to all.
+- Validates numbered output selections instead of silently replacing invalid
+  input with all outputs.
+- Video cutout has an independent straight-sRGB or straight-linear-Rec.709
+  output-color choice, forwarded as --cutout_linear when appropriate.
+- EXR remains scene-linear; its cutout includes RGBA.
+- Exposes despill strength in [0,1], default 0.5.
+- Runtime video clipping to [0,1] and preview sRGB encoding remain upstream
+  behavior. EXR is the float/HDR export path.
+
+Resources, execution and records:
+- Auto GPU-memory selection remains the default; manual mode exposes the
+  existing low-VRAM and Hann chunk/stride choices.
+- Offers leading-frame limit, output parent folder and temporary-cache folder.
+- Prints source color, levels, matte mode, output choices, cutout color, frame
+  limit, cache location and every source/destination before confirmation.
+- Rejects collisions when multiple sources map to the same output directory.
+- Calls out existing nonempty output folders before Start confirmation.
+- Uses a generated per-job temporary directory. Decoded frames and low-VRAM
+  feature files share that job lifetime and are removed on success/failure/
+  cancellation. Temporary disk needs can be substantial for long 4K shots.
+- Model subprocess uses sys.executable, keeping the bundled interpreter in
+  portable mode. Forces local/offline Hugging Face model loading.
+- Waits for the model subprocess before deleting temporary frames. On Ctrl+C,
+  terminates/waits for the child and escalates to kill only after a timeout.
+- Saves launcher_settings.json with original source/matte paths, selected
+  settings, FPS and the executed inference command in each output folder.
+- Nonzero inference exit codes are reported as errors, not successful jobs.
+
+PORTABLE RUNTIME BUILD
+
+tools/make_portable.ps1:
+- Locates the installed venv and resolves its matching CPython base runtime.
+- Accepts explicit -SourceEnvironment and -PythonHome for another build source.
+- Accepts -VCRedistDirectory for an explicit Microsoft x64 app-local CRT source,
+  otherwise discovers the SDK's Microsoft.VC*.CRT directory in standard Visual
+  Studio / Build Tools installation paths.
+- Requires a matching Windows CPython 3.11 runtime with python311.dll.
+- Copies the base Python executable, DLLs, standard library and bundled MSVC
+  runtime DLLs, plus all installed site-packages into runtime/.
+- Adds runtime/python311._pth with ONLY relative search paths: runtime root,
+  Lib, DLLs, Lib/site-packages and the application root, then import site.
+- The _pth file enables isolated mode, avoiding user-specific registry paths,
+  external PYTHONHOME/PYTHONPATH and unrelated user site packages.
+- Removes copied virtualenv-only startup hook files from the new runtime.
+- Copies all app-local DLLs from Microsoft.VC143.CRT into the Python executable
+  directory. The local build uses Visual Studio Build Tools CRT 14.44.35112,
+  including MSVCP140, its helper DLLs, VCRUNTIME140, VCRUNTIME140_1,
+  VCRUNTIME140_threads, CONCRT140 and VCCORLIB140.
+- Checks imports for PyTorch/OpenCV/Transformers/utils3d and asserts that every
+  Python search path resolves inside the application folder.
+- Uses Windows GetModuleFileNameW to verify that required MSVCP140 and
+  VCRUNTIME140 DLLs actually load from this payload. This closes the gap where
+  a same-machine folder-copy test could silently use an installed system VC++
+  runtime and fail later on a clean target PC.
+- Refuses to overwrite an existing runtime directory.
+
+Portable payload:
+- runtime/ contains Python 3.11.15 and all installed dependencies.
+- PyTorch 2.9.1+cu128 and torchvision 0.24.1+cu128 include their CUDA 12.8 runtime
+  components. A separate CUDA toolkit installation is unnecessary.
+- ffmpeg.exe is local to the application folder.
+- weights/ and vfms/ contain all downloaded model assets.
+- Application code, third_party/, runtime, weights, vfms and FFmpeg must remain
+  together. Folder renaming and changing the parent directory are supported.
+- The target PC still needs compatible Windows x64 hardware and an NVIDIA
+  GPU driver. This payload is not a Linux/macOS build and cannot supply a GPU
+  driver. Portability does not make an unsupported GPU supported.
+
+GIT IGNORE CHANGES / DO NOT COMMIT GENERATED PAYLOADS
+
+Added root ignore entries:
+- /runtime/ -- large binary Python/dependency bundle
+- /ffmpeg.exe -- local binary dependency
+- /INSTALLATION_STATUS.txt -- machine-specific original installation record
+- /LOCAL_INSTALLED_PACKAGES.txt -- local installed dependency snapshot
+- /START_HERE.txt -- local quick-start and machine-specific installation guide
+
+The upstream .gitignore already excludes venv/, model assets in weights/vfms,
+out*/ output/test folders, temporary memmaps and common media formats. Keep
+those exclusions. Do not stage the runtime/model payloads with git add -f.
+Copying the installed folder includes those assets; a source-only Git clone
+requires dependency/model setup and an optional portable-runtime build.
+
+UNCHANGED UPSTREAM COMPONENTS
+
+- infer.py, run_interactive.py, corridorkey/ model/runtime/writer implementation
+  and third_party/ sources were not edited for these features.
+- The original run_interactive.py remains usable directly with its original
+  behavior. The Windows BAT now selects the new color-aware workflow.
+- No model training, checkpoint modification or model-weight conversion.
+- No web service, hosted GUI, telemetry or paid plugin installation added.
+- requirements.txt is unchanged; launcher uses installed packages/stdlib.
+
+VALIDATION AND REGRESSIONS
+
+tests/test_launcher.py uses unittest and actual FFmpeg/ProRes decoding where
+precision matters. Its 10 tests cover:
+1. Linear ProRes shallow-ramp round trip: preserved midtones, native 128x64,
+   leading-frame limit, fractional 24000/1001 FPS, >90 distinct decoded ramp
+   levels and maximum allowed sample error 0.004.
+2. Explicit sRGB, BT.709 and identity-linear transfer equations.
+3. Real ProRes Rec.709 midgray decode, expected ~0.2595894 for encoded 0.5,
+   allowing 0.004 codec quantization error. Catches the erroneous darker zimg
+   display-EOTF interpretation (~0.191 in the initial implementation).
+4. Terminal selections route linear input, first-frame matte and linear cutout.
+5. Accepting menu defaults maps all frames to the -1 sentinel, avoiding an
+   attempted int('all') conversion.
+6. No-matte mode ignores discovered companions; missing full masks reprompt.
+7. Full-matte command includes explicit matte frames, authoritative mode,
+   linear input and EXR/FPS routing.
+8. Recognizes both flat frame folders and Input-subfolder structures.
+9. A video batch with shotFrameHint.png processes the actual video source.
+10. Full-matte mode rejects an image-only first-frame companion.
+
+Actual BAT integration tests (generated artifacts in out_launcher_verification):
+- A synthetic linear Rec.709 ProRes 4444 source, 640x360, 12 FPS.
+- No matte -> video alpha, transparent linear ProRes cutout and checker.
+- First-frame matte -> alpha + RGBA EXR sequences.
+- Authoritative full matte video -> video alpha + transparent sRGB ProRes.
+- Four frames per test, real installed GPU/model inference, decoded output
+  dimensions/frame counts checked, ProRes alpha planes decoded, finite EXR
+  pixels and RGBA channels checked, and temporary job cleanup checked.
+- All three actual BAT cases passed.
+
+Portable relocation verification is recorded separately after the bundle build.
+It copies the runnable payload to a renamed folder with spaces, removes system
+Python from the child PATH, supplies deliberately invalid PYTHONHOME/PYTHONPATH,
+checks isolated imports/CUDA, and runs the copied BAT/model/FFmpeg from a
+different working directory. See the final verification note below.
+
+Commands for a developer after setup:
+  runtime\python.exe -m unittest discover -s tests -v
+  git diff --check
+
+Before runtime bundling, use venv\Scripts\python.exe instead. In restricted
+Windows sandboxes, temporary-directory ACLs can deny tests; run the command
+with access to a writable TEMP directory or use a workspace-local temp directory.
+
+INITIAL INSTALLATION CONTEXT (NOT ADDITIONAL SOURCE PATCHES)
+
+- Isolated Python 3.11.15 was used because the dependency set requires a newer
+  Python than the system's Python 3.10.
+- Installed tested CUDA PyTorch/torchvision versions above, NumPy 1.26.4,
+  OpenCV 4.11.0.86, Transformers 4.57.6 and remaining requirements.
+- OpenCV was pinned during installation to preserve the repo's NumPy <2 range.
+- Used the official download_weights.py to obtain CorridorKey and all three
+  foundation models. RVM's script checksum verification passed.
+- PyTorch's official wheel SHA-256 was verified before installation:
+  633005a3700e81b5be0df2a7d3c1d48aced23ed927653797a3bd2b144a3aeeb6
+- Bundled local FFmpeg 7.1. Original installation smoke tests verified all four
+  video outputs, ProRes alpha, and low-VRAM first-frame-hinted EXR export.
+- Installation-only helper scripts and generated media/results are in ignored
+  out*/ folders and should not be added to the fork commit.
+
+LIMITS OF VALIDATION
+
+Synthetic tests establish installation/route/encoding correctness, not visual
+key quality or 4K throughput on production footage. They do not validate other
+gamuts, camera log transfers, arbitrary variable-frame-rate timing, or a second
+physical PC's GPU/driver compatibility. Test a short segment of actual footage
+before running a long shot. Use upstream color conversion for unsupported
+source gamuts/transfers; choose EXR when unclipped HDR output is needed.
+
+FINAL PORTABLE VERIFICATION RESULT
+
+PASS - the runnable payload was copied to a differently named folder containing
+spaces, with no venv copied into that payload. A new process was launched from
+a different working directory with system Python absent from PATH and with
+PYTHONHOME/PYTHONPATH deliberately pointing at nonexistent external paths.
+
+- Bundled CPython ran in isolated mode.
+- Every Python search path resolved inside the copied application folder.
+- PyTorch 2.9.1+cu128 detected CUDA and the NVIDIA RTX 4090 Laptop GPU.
+- Windows reported MSVCP140, VCRUNTIME140 and VCRUNTIME140_1 loaded from the
+  copied runtime directory, rather than Windows/System32.
+- The copied BAT used the copied interpreter, application modules, model
+  assets and FFmpeg for real inference on a linear Rec.709 ProRes test clip.
+- The copied BAT exited 0 and produced a decodable ProRes cutout with alpha.
+- The portable interpreter passed all 10 source regression tests.
+- PowerShell parser accepted tools/make_portable.ps1 without syntax errors.
+- git diff --check completed without whitespace errors.
+- Read-only review found no remaining actionable launcher/packaging issues
+  after the documented fixes and app-local CRT additions.
+
+Retained local evidence (ignored by Git):
+- out_launcher_verification/verification.json and per-mode BAT logs
+- out_portable_relocation/verification.json and relocated_bat.log
+- out_setup_test/verification.json from the original runtime smoke tests
+
+The large temporary relocated copy is removed after verification. The working
+portable installation remains at the project root. The original venv is kept
+as a local build source/fallback; it is not needed in a portable folder copy.
+The BAT always prefers runtime/python.exe when present.
+
+Reference for the app-local C++ runtime packaging approach:
+https://learn.microsoft.com/en-us/cpp/windows/choosing-a-deployment-method
+
+BUGFIX FOLLOW-UP - 2026-10-21 - FRESH MP4 STARTUP / OPENEXR
+
+User-visible failure:
+The BAT could decode a source MP4 to temporary EXRs, then abort while opening
+the EXRs with OpenCV: (-213) OpenEXR codec is disabled. This affected non-linear
+source choices (sRGB and Rec.709) in a fresh launcher process. MP4 and the
+supplied matte were supported; this was a launcher initialization-order bug.
+
+Root cause:
+video_metadata() imported cv2 before decode_video() attempted to set
+OPENCV_IO_ENABLE_OPENEXR. OpenCV had already cached its codec configuration.
+The late environment assignment could not enable the codec for that process.
+Initial source tests enabled EXR globally for their fixtures, masking this
+failure. The original actual BAT integration cases selected linear ProRes,
+which did not read/rewrite temporary EXRs in the parent before model startup.
+
+Source changes in this follow-up:
+- corridorkey_launcher.py: enables OPENCV_IO_ENABLE_OPENEXR=1 at module startup,
+  before importing project helpers or OpenCV. Removes the misleading late
+  assignments inside decode_video() and decode_sequence(). This also covers
+  direct corridorkey_launcher.py use without the BAT.
+- CorridorKey_DRAG_CLIPS_HERE.bat: sets OPENCV_IO_ENABLE_OPENEXR=1 before Python
+  starts. setlocal keeps that environment change scoped to this invocation.
+- The required flag is explicitly enabled even if an inherited environment
+  value is 0, because this launcher's internal float-EXR pipeline requires it.
+- tests/test_launcher.py: adds a real MP4 regression that spawns NEW Python
+  processes for each source-color choice (sRGB and Rec.709), testing both an
+  unset flag and an inherited value of 0. Each process probes video metadata,
+  decodes two MP4 frames, and reads the float EXRs at the correct dimensions.
+  No test-process cv2 import or global flag can hide the startup-order failure.
+- changelog.txt: records this bug, its cause, exact patch and validation.
+
+Verification:
+- Reproduced the user's exact OpenCV failure in all four fresh-process cases
+  before the fix. All four cases pass after the fix.
+- Full source suite: 11 tests pass with bundled runtime/python.exe.
+- Actual BAT MP4-source + full-MP4-matte GPU inference passed in a new process
+  with the inherited EXR flag unset: exit 0, four decoded 640x360 output frames,
+  transparent ProRes alpha plane verified, and temporary job cache cleaned.
+  Retained local log/report: out_mp4_exr_fix/ (ignored by Git).
+
+No new dependency, runtime rebuild, checkpoint download or codec change is
+required. The installed portable folder uses the patched source immediately.
+An earlier copy on another PC needs the updated BAT and launcher Python file;
+copy the updated tests/changelog as well when synchronizing development files.
+
+PACKAGING FOLLOW-UP - 2026-10-21 - corridorkey-2_0-portable
+
+The final runnable installation is consolidated into the named distribution
+folder corridorkey-2_0-portable. Copy THAT complete folder to the other PC;
+the original parent development checkout is not a runtime dependency.
+Earlier entries describing the project root refer to the initial build layout.
+
+Included in the distribution:
+- Bundled Python/runtime dependencies, app-local Microsoft CRT DLLs, FFmpeg,
+  CorridorKey application code, vendored MoGe source and every required model.
+- This full changelog and the upstream license/third-party notices.
+- README.txt: beginner steps, linear ProRes selection, matte/export choices,
+  copying to another PC and practical troubleshooting.
+- README_ADVANCED.txt: exact transfer assumptions, float EXR preparation,
+  source vs output color, AE matte preparation, CLI/resource/cache behavior,
+  OpenEXR fix, portability and rebuild information.
+- AI_AGENT_INSTRUCTIONS.txt: exact commit list, source patch workflow,
+  portability and linear Rec.709 ProRes invariants, test commands, source-vs-
+  binary distinction, and instructions to target the user's fork.
+- AGENT_HANDOFF/changes.patch: both tracked edits and all new source/docs.
+- AGENT_HANDOFF/source_changes/: exact repository-relative changed files.
+- Source snapshot hashes and baseline identity for verifying the handoff.
+
+Excluded from the distribution:
+- .git history, the old venv, previous source renders (including out_shot),
+  generated test clips/results, download caches and redundant Python caches.
+- The original development checkout and its machine-specific status reports.
+
+The existing source checkout is kept outside the distribution for development.
+Large runtime/model payloads are relocated into the portable folder rather
+than shipping a second full environment. Git-tracked placeholder files remain
+in the development checkout; no upstream model/runtime source deletion or
+repository-prefix reorganization is intended for the fork commit.
+
+Additional source edits for packaging:
+- .gitignore now excludes /corridorkey-2_0-portable/ as an installed binary
+  distribution. Keep this entry to prevent accidental bulk binary staging.
+- tests/test_launcher.py locates its application root by the presence of
+  infer.py and ffmpeg.exe, supporting source-root tests and handed-off tests
+  beneath the portable folder. Its ProRes fixture uses a normal temporary
+  directory instead of depending on a pre-existing out_setup_test folder.
+- The simple/advanced/AI guides above are new source documentation. They must
+  be committed at the fork ROOT, not under a nested release-folder prefix.
+- No model architecture, checkpoint, infer.py, requirements.txt, upstream
+  run_interactive.py or vendored model source was changed by repackaging.
+
+The source patch is checked against a clean archive of the baseline revision,
+and patch-applied source hashes are compared with the exact final snapshots.
+The named folder is verified using its own bundled interpreter, the handed-
+off regression tests, isolated Python/C++ DLL locations and actual BAT/model
+processing. PACKAGE_VERIFICATION.txt summarizes the final packaging checks.

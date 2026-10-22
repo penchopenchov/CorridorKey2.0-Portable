@@ -1,5 +1,10 @@
 # CorridorKey 2.0
 
+> **Note:** The additions in this fork (guided Windows launcher, portable
+> packaging, documentation) were developed with AI assistance (GPT-6.1 Sol,
+> High reasoning). The underlying model and inference code is the original
+> upstream CorridorKey 2.0. Please review the code before use.
+
 Welcome to CorridorKey 2.0! You may rest easy, weary artist. The green beast has been slain. The CorridorKey 2.0 model was designed and trained by Zachary Harris, in direct collaboration with Niko and Corridor Digital.
 
 # Check out our official plugin!
