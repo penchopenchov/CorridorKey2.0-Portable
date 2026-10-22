@@ -1,7 +1,7 @@
 # CorridorKey 2.0
 
 > **Note:** The additions in this fork (guided Windows launcher, portable
-> packaging, documentation) were developed with AI assistance (GPT-6.1 Sol,
+> packaging, documentation, etc) were developed with AI assistance (GPT-6.1 Sol,
 > High reasoning). The underlying model and inference code is the original
 > upstream CorridorKey 2.0. Please review the code before use.
 
