@@ -440,3 +440,54 @@ New one-click source-side setup for Windows:
 
 The model, runtime, launcher, weights and portable build are unchanged by
 this script; it only automates the documented manual setup steps.
+
+ROOT INSTALLATION CLEANUP AND CLI PROGRESS - 2026-10-21
+
+- Aligned the development checkout with the source fork at 57f972f. The fork
+  is origin; the original project is upstream. Prior local source changes
+  were preserved in a Git stash before advancing the checkout.
+- Consolidated runtime/, weights/, vfms/ and FFmpeg alongside the application
+  at the repository root. Removed the nested installed distribution, duplicate
+  fork checkout, redundant venv, old verification media/results, download
+  metadata caches and machine-specific installation reports.
+- Removed the legacy tests directory as requested. Historical test references
+  above describe previous revisions. New verification uses temporary files;
+  scripts/smoke_test_runtime.py remains available to check model loading.
+- Updated guides for the flat installation and removed the obsolete nested
+  distribution ignore entry. Runtime/model binaries remain ignored by Git.
+- Added the standard-library-only cli_progress.py helper: clip label, stage,
+  stage percentage, actual frames completed/total, elapsed time and stage ETA.
+  Interactive output refreshes in place; redirected stderr gets periodic lines.
+  Loading/finalization use an elapsed heartbeat while remaining work is unknown.
+- FFmpeg preparation now streams its machine-readable frame progress, retains
+  decoding error diagnostics, and terminates/waits for the decoder on cancel.
+  Transfer conversion and image-sequence preparation report completed frames.
+- infer.py reports dependency/model loading. Runtime prepasses report source
+  frames; temporal progress counts finalized unique frames across overlapping
+  windows. Normal mode combines inference/rendering; low-VRAM mode separates
+  them. Output finalization and temporary-cache cleanup remain visible.
+- Progress is per stage, not an overall-job percentage or ETA. Model math,
+  color transfer equations, export formats and native resolution are unchanged.
+- GPU progress includes live allocated/reserved PyTorch VRAM in GiB for the
+  inference process. Reserved includes cached memory; values exclude CUDA
+  context/driver overhead, allocations outside PyTorch and other applications.
+  The local Windows WDDM driver reports nvidia-smi process usage as unavailable,
+  so the display uses worker-local allocator counters instead of GPU-wide usage.
+- Narrow-terminal formatting retains frame/time/VRAM fields and omits optional
+  window details. Telemetry failures do not interrupt processing.
+
+Validation for this change (temporary verification files, not shipped tests):
+- Eleven progress/preparation/VRAM behavioral checks passed, including failure,
+  cancellation, heartbeat, redirected output and 80-column terminal rendering.
+- All eleven original launcher regressions passed when loaded from Git into
+  temporary verification files, including fresh-process MP4/OpenEXR cases and
+  linear-ProRes precision/FPS checks.
+- Actual decoder failure retained FFmpeg diagnostics. Injected cancellation
+  terminated/reaped the actual decoder and removed its temporary job cache.
+- Normal GPU mode with overlapping windows produced all four video outputs;
+  low-VRAM mode with a full matte produced alpha/RGBA EXRs. Both processed
+  three 640x360 frames at 24000/1001 FPS, reported live nonzero allocator VRAM,
+  and passed output/frame-count/cache checks. These are synthetic functional
+  checks, not a production-footage quality or performance benchmark.
+- Independent read-only review found no remaining actionable issues after
+  the narrow-terminal fix. Python syntax and git diff --check passed.

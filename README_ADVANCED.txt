@@ -154,6 +154,43 @@ source/matte, selected settings, FPS and the executed model command.
 
 6. COMMAND LINE
 
+PROGRESS REPORTING
+
+The guided launcher and direct infer.py both report stage progress. The
+launcher covers media metadata, source/matte decoding, transfer conversion,
+frame-sequence preparation and temporary-cache cleanup. The inference worker
+covers Python/model loading, RVM, optional low-VRAM foundation precomputation,
+temporal inference, rendering and output finalization.
+
+The line shows clip index, stage, percentage, completed/total source frames,
+elapsed stage time and stage ETA. ETA uses the average measured stage rate;
+it is an estimate, not a prediction of the whole job. Unknown-length stages
+keep an elapsed heartbeat with "estimating" instead of invented percentages.
+Frame totals from video metadata are reconciled with actual decoded files.
+
+Normal mode interleaves temporal inference and stage-2 rendering; its counter
+advances when unique frames have been finalized and submitted to the writers,
+not for each overlapping window or each selected output. Low-VRAM mode reports
+temporal inference and rendering separately. Writers may still be encoding
+after rendering reaches 100%; output finalization waits for them to finish.
+
+Interactive terminals update in place, normally four times per second.
+Redirected stderr gets line-based stage updates about every five seconds,
+plus stage start/end. Existing diagnostic output remains visible. Interrupted
+or failing stages retain their actual counts and are labeled canceled/failed.
+
+GPU stages also show VRAM as allocated/reserved GiB for this inference worker.
+Allocated is memory occupied by live PyTorch tensors. Reserved is the total
+PyTorch allocator footprint, including allocated tensors and reusable cached
+blocks; do not add the two numbers. They exclude CUDA context/driver overhead,
+allocations outside the PyTorch allocator and other applications. This works
+when Windows WDDM makes nvidia-smi per-process memory unavailable. Counters
+are read without launching monitoring subprocesses or synchronizing the GPU.
+
+Narrow consoles use a compact layout: [clip/total], frames with an f suffix,
+t for elapsed stage time, and VRAM<allocated>/<reserved>GiB. Optional window
+details are omitted so frame counts, ETA and memory remain visible.
+
 From this portable folder in PowerShell:
 
   .\runtime\python.exe corridorkey_launcher.py "D:\Footage\shot.mov"
@@ -176,16 +213,18 @@ This package includes that fix. Fresh-process regressions cover sRGB/Rec.709
 MP4 decoding with the variable missing or inherited as 0, without relying on
 the main test process's EXR setting.
 
-The developer handoff includes the regression suite and full patch. Details
-and dated test history are in changelog.txt. The package is verified with
-bundled Python and actual BAT/model processing; reports summarize synthetic
-tests, not a quality benchmark on production footage or a second physical PC.
+Details and dated regression history are in changelog.txt. The installation
+has been checked with bundled Python and actual model processing. Historical
+synthetic tests are not a quality benchmark on production footage or a second
+physical PC. To validate model loading, run:
+  runtime\python.exe scripts\smoke_test_runtime.py --load_model
 
 8. FORK AND REBUILDING
 
-The source fork commits the launcher, the portable build script, the tests
-and this documentation; agent-internal handoff material is not part of the
-fork. The parent development checkout is not needed on the destination PC.
+The repository root contains the launcher, setup/build scripts and this
+documentation, alongside the ignored installed runtime and model payloads.
+There is no nested portable installation or separate development checkout.
+Legacy regression tests and agent handoff copies have been removed.
 
 Source Git commits exclude runtime, model binaries, FFmpeg, caches and output
 media. A source-only clone is not itself a ready-installed portable release.

@@ -3,9 +3,10 @@ CORRIDORKEY 2.0 PORTABLE - START HERE
 
 COPY THIS WHOLE FOLDER TO YOUR OTHER PC
 
-The folder is named corridorkey-2_0-portable. Copy it intact and keep its files
-together. You do not need the original project folder, a separate Python
-installation, or a CUDA toolkit. Run it from a local, fully downloaded folder.
+The application runs directly from the repository folder (CorridorKey 2.0 on
+this installation). Copy it intact and keep its files together, including
+runtime/, weights/, vfms/ and ffmpeg.exe. No portable subfolder, separate
+Python installation or CUDA toolkit is needed. Run it from a local folder.
 
 The other PC needs compatible Windows x64, a supported NVIDIA GPU and a
 compatible NVIDIA driver. The app does not install a GPU driver.
@@ -48,6 +49,17 @@ HOW TO PROCESS A CLIP
 Do not close the terminal until processing finishes. Import the cutout MOV
 into your editor; select Straight / Unmatted alpha if it asks. Keep your
 original audio in the editing timeline.
+
+The progress line shows the clip number, current stage, stage percentage,
+frames processed/total, elapsed time and estimated time remaining for that
+stage. Each stage starts its own counter. Loading, finalization and cleanup
+show elapsed time and "estimating" when a percentage cannot be measured.
+Normal inference combines inference and rendering; low-VRAM mode shows them
+separately. A stage reaching 100% does not mean the entire clip has finished.
+Wait for the final completion message. Redirected logs get periodic updates.
+During GPU processing, VRAM shows allocated/reserved PyTorch memory in GiB:
+active tensor memory / total allocator memory including its reusable cache.
+These are this worker's figures, excluding driver overhead and other apps.
 
 HOW TO GIVE IT YOUR AFTER EFFECTS ROTO
 

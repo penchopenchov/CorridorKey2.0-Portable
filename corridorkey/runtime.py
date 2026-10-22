@@ -12,6 +12,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from cli_progress import Progress
+
 from . import color_utils as cu
 from .model import CorridorKeyV3
 from .video_io import (
@@ -320,7 +322,7 @@ def precompute_rvm_to_memmap(model, source, meta, rvm_path: Path,
     else:
         chunks = iter_frame_dir_chunks(str(source), meta, chunk_size=chunk, need_model=False)
     state = None
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    with Progress("RVM prepass", T_all) as progress, ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(_next_or_none, chunks)
         while True:
             item = future.result()
@@ -338,6 +340,7 @@ def precompute_rvm_to_memmap(model, source, meta, rvm_path: Path,
                 feats, state = model.foundations.rvm(rgb_rvm, state=state)
             feats_cpu = (feats.float().cpu() - mean) / std
             out[t0:t0 + Tc] = feats_cpu[0].numpy().astype(np.float16)
+            progress.update(t0 + Tc)
             del rgb, rgb_rvm, feats, feats_cpu, display
     out.flush()
     del out
@@ -372,7 +375,7 @@ def precompute_foundations_to_memmap(model, source, meta, prefix: Path,
         chunks = iter_video_frame_chunks(str(source), meta, chunk_size=chunk, need_model=False)
     else:
         chunks = iter_frame_dir_chunks(str(source), meta, chunk_size=chunk, need_model=False)
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    with Progress("Foundation prepass", T_all) as progress, ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(_next_or_none, chunks)
         while True:
             item = future.result()
@@ -391,6 +394,7 @@ def precompute_foundations_to_memmap(model, source, meta, prefix: Path,
             moge_out[t0:t0 + Tc] = ff["moge"].float().cpu().numpy()
             if cradio_out is not None:
                 cradio_out[t0:t0 + Tc] = ff["cradio"].float().cpu().numpy()
+            progress.update(t0 + Tc)
             del rgb, rgb_radio, rgb_moge, ff, display
     moge_out.flush()
     del moge_out
@@ -477,105 +481,107 @@ def hann_stage1_stream(model, source, meta, *, reader_cls, reader_kind: str,
         if ready:
             on_baton_frames(ready)
 
-    try:
-        for i, t0 in enumerate(starts):
-            t1 = min(t0 + chunk, T_all)
-            Tc = t1 - t0
-            model_chunk, display_chunk, review_chunk = reader.window(t0, t1)
-            hint_cpu = torch.zeros(1, Tc, 1, H, W, dtype=torch.bfloat16)
-            hint_quality_cpu = torch.zeros(1, Tc, dtype=torch.bfloat16)
-            hint_present = torch.zeros(1, Tc, dtype=torch.bool)
-            if hint_reader is not None:
-                hint_cpu[0] = hint_reader.window(t0, t1)
-                hint_quality_cpu.fill_(float(full_hint_quality))
-                hint_present.fill_(True)
-            for j, t_abs in enumerate(range(t0, t1)):
-                if t_abs in carry_cache:
-                    hint_cpu[0, j] = carry_cache[t_abs]
-                    hint_quality_cpu[0, j] = float(carry_hint_quality)
-                    hint_present[0, j] = True
-            if initial_hint is not None and t0 == 0:
-                hint_cpu[0, 0] = initial_hint.to(dtype=hint_cpu.dtype)
-                hint_quality_cpu[0, 0] = float(initial_hint_quality)
-                hint_present[0, 0] = True
-            if not bool(hint_present.any().item()):
-                hint_quality_cpu.fill_(-1.0)
-
-            if on_baton_frames is not None:
+    stage = "Temporal inference" if on_baton_frames is None else "Inference + rendering"
+    with Progress(stage, T_all) as progress:
+        try:
+            for i, t0 in enumerate(starts):
+                t1 = min(t0 + chunk, T_all)
+                Tc = t1 - t0
+                model_chunk, display_chunk, review_chunk = reader.window(t0, t1)
+                hint_cpu = torch.zeros(1, Tc, 1, H, W, dtype=torch.bfloat16)
+                hint_quality_cpu = torch.zeros(1, Tc, dtype=torch.bfloat16)
+                hint_present = torch.zeros(1, Tc, dtype=torch.bool)
+                if hint_reader is not None:
+                    hint_cpu[0] = hint_reader.window(t0, t1)
+                    hint_quality_cpu.fill_(float(full_hint_quality))
+                    hint_present.fill_(True)
                 for j, t_abs in enumerate(range(t0, t1)):
-                    stage2_frame_cache[t_abs] = model_chunk[j]
+                    if t_abs in carry_cache:
+                        hint_cpu[0, j] = carry_cache[t_abs]
+                        hint_quality_cpu[0, j] = float(carry_hint_quality)
+                        hint_present[0, j] = True
+                if initial_hint is not None and t0 == 0:
+                    hint_cpu[0, 0] = initial_hint.to(dtype=hint_cpu.dtype)
+                    hint_quality_cpu[0, 0] = float(initial_hint_quality)
+                    hint_present[0, 0] = True
+                if not bool(hint_present.any().item()):
+                    hint_quality_cpu.fill_(-1.0)
 
-            rgb_c = model_chunk.unsqueeze(0).to(device, non_blocking=True)
-            hint_c = hint_cpu.to(device, non_blocking=True)
-            hint_quality_c = hint_quality_cpu.to(device, non_blocking=True)
-            ff = rgb_radio = rgb_moge = None
-            if foundation_paths is None:
-                rgb_found = display_chunk.unsqueeze(0).to(device, non_blocking=True)
-                rgb_radio, rgb_moge = _build_foundation_inputs(rgb_found)
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    ff = model.foundations(
-                        rgb_cradio=rgb_radio.reshape(Tc, 3, *rgb_radio.shape[-2:]),
-                        rgb_moge=rgb_moge.reshape(Tc, 3, *rgb_moge.shape[-2:]),
-                    )
-                cradio_feat = ff["cradio"].reshape(1, Tc, -1, H // 64, W // 64)
-                moge_feat = ff["moge"].reshape(1, Tc, -1, H // 64, W // 64)
-            else:
-                moge_feat = torch.from_numpy(np.asarray(moge_map[t0:t1]).copy())
-                moge_feat = moge_feat.unsqueeze(0).to(device, non_blocking=True).float()
-                cradio_feat = torch.from_numpy(np.asarray(cradio_map[t0:t1]).copy())
-                cradio_feat = cradio_feat.unsqueeze(0).to(device, non_blocking=True).float()
-            rvm_feat = None
-            if rvm_map is not None:
-                rvm_feat = torch.from_numpy(np.asarray(rvm_map[t0:t1]).copy())
-                rvm_feat = rvm_feat.unsqueeze(0).to(device, non_blocking=True).float()
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                s1 = model.stage1(
-                    rgb_c, hint_c, moge_feat, cradio_feat=cradio_feat,
-                    rvm_feat=rvm_feat, t_stride=1.0,
-                    hint_quality=hint_quality_c,
-                )
-            baton_gpu = s1["baton"][0].float()
-            if carry_hint_from_aux:
-                aux_alpha = s1["aux"][0, :, 0:1].float()
-                aux_full = F.interpolate(
-                    aux_alpha, size=(H, W), mode="bilinear",
-                    align_corners=False).clamp(0.0, 1.0)
-                aux_cpu = aux_full.to("cpu", dtype=torch.bfloat16)
-                for j, t_abs in enumerate(range(t0, t1)):
-                    carry_cache[t_abs] = aux_cpu[j].clone()
-                next_start = starts[i + 1] if i + 1 < len(starts) else T_all
-                for old_t in [k for k in carry_cache if k < next_start]:
-                    del carry_cache[old_t]
-                del aux_alpha, aux_full, aux_cpu
-            w = taper_weights(Tc, overlap, is_first=(i == 0),
-                              is_last=(i == len(starts) - 1),
-                              device="cpu", dtype=torch.float32)
-            weighted = (baton_gpu * w.to(device).view(Tc, 1, 1, 1)).to("cpu").numpy()
-            w_np = w.numpy()
-            for j, t_abs in enumerate(range(t0, t1)):
-                if t_abs not in live_acc:
-                    live_acc[t_abs] = weighted[j].copy()
-                    live_w[t_abs] = float(w_np[j])
+                if on_baton_frames is not None:
+                    for j, t_abs in enumerate(range(t0, t1)):
+                        stage2_frame_cache[t_abs] = model_chunk[j]
+
+                rgb_c = model_chunk.unsqueeze(0).to(device, non_blocking=True)
+                hint_c = hint_cpu.to(device, non_blocking=True)
+                hint_quality_c = hint_quality_cpu.to(device, non_blocking=True)
+                ff = rgb_radio = rgb_moge = None
+                if foundation_paths is None:
+                    rgb_found = display_chunk.unsqueeze(0).to(device, non_blocking=True)
+                    rgb_radio, rgb_moge = _build_foundation_inputs(rgb_found)
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        ff = model.foundations(
+                            rgb_cradio=rgb_radio.reshape(Tc, 3, *rgb_radio.shape[-2:]),
+                            rgb_moge=rgb_moge.reshape(Tc, 3, *rgb_moge.shape[-2:]),
+                        )
+                    cradio_feat = ff["cradio"].reshape(1, Tc, -1, H // 64, W // 64)
+                    moge_feat = ff["moge"].reshape(1, Tc, -1, H // 64, W // 64)
                 else:
-                    live_acc[t_abs] += weighted[j]
-                    live_w[t_abs] += float(w_np[j])
-            next_start = starts[i + 1] if i + 1 < len(starts) else T_all
-            del s1, baton_gpu, weighted, ff, cradio_feat, moge_feat, rvm_feat
-            del rgb_c, hint_c, hint_quality_c, hint_cpu, hint_quality_cpu
-            del model_chunk, display_chunk, review_chunk
-            flush_before(next_start)
-            print(f"      window {i + 1}/{len(starts)} [{t0}:{t1}]", flush=True)
-        torch.cuda.synchronize()
-        flush_before(T_all + 1)
-    finally:
-        reader.close()
-        if hint_reader is not None:
-            hint_reader.close()
+                    moge_feat = torch.from_numpy(np.asarray(moge_map[t0:t1]).copy())
+                    moge_feat = moge_feat.unsqueeze(0).to(device, non_blocking=True).float()
+                    cradio_feat = torch.from_numpy(np.asarray(cradio_map[t0:t1]).copy())
+                    cradio_feat = cradio_feat.unsqueeze(0).to(device, non_blocking=True).float()
+                rvm_feat = None
+                if rvm_map is not None:
+                    rvm_feat = torch.from_numpy(np.asarray(rvm_map[t0:t1]).copy())
+                    rvm_feat = rvm_feat.unsqueeze(0).to(device, non_blocking=True).float()
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    s1 = model.stage1(
+                        rgb_c, hint_c, moge_feat, cradio_feat=cradio_feat,
+                        rvm_feat=rvm_feat, t_stride=1.0,
+                        hint_quality=hint_quality_c,
+                    )
+                baton_gpu = s1["baton"][0].float()
+                if carry_hint_from_aux:
+                    aux_alpha = s1["aux"][0, :, 0:1].float()
+                    aux_full = F.interpolate(
+                        aux_alpha, size=(H, W), mode="bilinear",
+                        align_corners=False).clamp(0.0, 1.0)
+                    aux_cpu = aux_full.to("cpu", dtype=torch.bfloat16)
+                    for j, t_abs in enumerate(range(t0, t1)):
+                        carry_cache[t_abs] = aux_cpu[j].clone()
+                    next_start = starts[i + 1] if i + 1 < len(starts) else T_all
+                    for old_t in [k for k in carry_cache if k < next_start]:
+                        del carry_cache[old_t]
+                    del aux_alpha, aux_full, aux_cpu
+                w = taper_weights(Tc, overlap, is_first=(i == 0),
+                                  is_last=(i == len(starts) - 1),
+                                  device="cpu", dtype=torch.float32)
+                weighted = (baton_gpu * w.to(device).view(Tc, 1, 1, 1)).to("cpu").numpy()
+                w_np = w.numpy()
+                for j, t_abs in enumerate(range(t0, t1)):
+                    if t_abs not in live_acc:
+                        live_acc[t_abs] = weighted[j].copy()
+                        live_w[t_abs] = float(w_np[j])
+                    else:
+                        live_acc[t_abs] += weighted[j]
+                        live_w[t_abs] += float(w_np[j])
+                next_start = starts[i + 1] if i + 1 < len(starts) else T_all
+                del s1, baton_gpu, weighted, ff, cradio_feat, moge_feat, rvm_feat
+                del rgb_c, hint_c, hint_quality_c, hint_cpu, hint_quality_cpu
+                del model_chunk, display_chunk, review_chunk
+                flush_before(next_start)
+                progress.update(next_start, detail=f"window {i + 1}/{len(starts)}")
+            torch.cuda.synchronize()
+            flush_before(T_all + 1)
+        finally:
+            reader.close()
+            if hint_reader is not None:
+                hint_reader.close()
 
-    if baton_fp16 is not None:
-        baton_fp16.flush()
-    del baton_fp16, live_acc, live_w, rvm_map, cradio_map, moge_map
-    torch.cuda.empty_cache()
+        if baton_fp16 is not None:
+            baton_fp16.flush()
+        del baton_fp16, live_acc, live_w, rvm_map, cradio_map, moge_map
+        torch.cuda.empty_cache()
 
 
 def _crop_native_torch(x: torch.Tensor, meta: dict) -> torch.Tensor:
@@ -912,26 +918,29 @@ def run_inference(model, input_path: str, output_dir: str, cfg: InferenceConfig,
                 baton_path, dtype=np.float16, mode="r",
                 shape=(T_all, model.stage1.d_16, H // 16, W // 16))
             reader = reader_cls(input_path, meta)
-            try:
-                for t0 in range(0, T_all, stage2_batch):
-                    t1 = min(T_all, t0 + stage2_batch)
-                    model_chunk, _display_chunk, _review_chunk = reader.window(t0, t1)
-                    items = [
-                        (t, np.asarray(baton[t]).copy(), model_chunk[t - t0])
-                        for t in range(t0, t1)
-                    ]
-                    write_prediction_batches(items)
-                    del model_chunk, _display_chunk, _review_chunk, items
-            finally:
-                reader.close()
-                del baton
+            with Progress("Rendering + writing", T_all) as progress:
+                try:
+                    for t0 in range(0, T_all, stage2_batch):
+                        t1 = min(T_all, t0 + stage2_batch)
+                        model_chunk, _display_chunk, _review_chunk = reader.window(t0, t1)
+                        items = [
+                            (t, np.asarray(baton[t]).copy(), model_chunk[t - t0])
+                            for t in range(t0, t1)
+                        ]
+                        write_prediction_batches(items)
+                        progress.update(t1)
+                        del model_chunk, _display_chunk, _review_chunk, items
+                finally:
+                    reader.close()
+                    del baton
     finally:
-        for writer in writers.values():
-            writer.release()
-        safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_rvm_feat.f16")
-        safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_baton.f16")
-        safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_foundation_cradio.f32")
-        safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_foundation_moge.f32")
-        torch.cuda.empty_cache()
+        with Progress("Finalizing outputs", unit=None):
+            for writer in writers.values():
+                writer.release()
+            safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_rvm_feat.f16")
+            safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_baton.f16")
+            safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_foundation_cradio.f32")
+            safe_remove(cfg.temp_dir / f"{raw_clip_name(input_path)}_foundation_moge.f32")
+            torch.cuda.empty_cache()
     print(f"  wrote {len(writers)} output video(s) for {clip_name} "
           f"({T_all} frames @ {W_out}x{H_out})")

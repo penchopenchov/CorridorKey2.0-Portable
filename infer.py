@@ -10,16 +10,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from pathlib import Path
 
-import torch
-
-from corridorkey.runtime import (
-    InferenceConfig,
-    RuntimePaths,
-    WriterConfig,
-    load_model,
-    run_inference,
-)
-from corridorkey.video_io import require_ffmpeg
+from cli_progress import Progress, set_vram_provider
 
 
 def _parse_outputs(values):
@@ -117,8 +108,18 @@ def main():
                     default=2048)
     args = ap.parse_args()
 
+    with Progress('Loading Python dependencies', unit=None):
+        import torch
+        from corridorkey.runtime import (
+            InferenceConfig, RuntimePaths, WriterConfig, load_model, run_inference,
+        )
+        from corridorkey.video_io import require_ffmpeg
+
     if not torch.cuda.is_available():
         raise RuntimeError("CorridorKey v2 runtime requires a CUDA GPU.")
+    # Read this worker's CUDA allocator counters; GPU-wide usage includes other apps.
+    set_vram_provider(lambda: (torch.cuda.memory_allocated(0), torch.cuda.memory_reserved(0)))
+    print("VRAM: allocated/reserved by PyTorch, in GiB (excludes CUDA driver overhead).", flush=True)
     require_ffmpeg(args.ffmpeg_bin)
     package_root = Path(__file__).resolve().parent
     paths = RuntimePaths.from_package(package_root, args.weights)
@@ -166,7 +167,8 @@ def main():
         output_format=args.output_format,
         exr_dtype=args.exr_dtype,
     )
-    model = load_model(paths, device="cuda")
+    with Progress('Loading model', unit=None):
+        model = load_model(paths, device="cuda")
     run_inference(
         model,
         args.input,

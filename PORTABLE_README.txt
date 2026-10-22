@@ -1,14 +1,18 @@
 CorridorKey 2.0 - portable Windows installation
 =============================================
 
-The final installed distribution is corridorkey-2_0-portable.
-Its beginner guide is README.txt, detailed guide is README_ADVANCED.txt,
-and fork handoff is AI_AGENT_INSTRUCTIONS.txt. This file is retained as source
-documentation in the AI handoff; it is not a separate runtime dependency.
+The repository folder is also the runnable installation. Application source,
+runtime/, weights/, vfms/ and ffmpeg.exe live together at the root; there is
+no separate portable subfolder. See README.txt for the beginner guide and
+README_ADVANCED.txt for the detailed guide.
 
 RUNNING
 
 Double-click CorridorKey_DRAG_CLIPS_HERE.bat, or drop a clip/folder onto it.
+The terminal shows current stage, percentage, completed frames, elapsed time
+and stage ETA. Loading and finalization show an elapsed heartbeat while their
+remaining time is unknown. See README_ADVANCED.txt for counter semantics.
+GPU stages include this worker's allocated/reserved PyTorch VRAM in GiB.
 No system Python, pip, uv, CUDA toolkit, environment activation, or online
 model download is required once this complete folder is installed.
 
@@ -103,6 +107,6 @@ copied app-locally and their actual loaded DLL locations are validated.
 To run a source command with bundled Python:
 
   runtime\python.exe corridorkey_launcher.py
-  runtime\python.exe -m unittest discover -s tests -v
+  runtime\python.exe scripts\smoke_test_runtime.py --load_model
 
 See changelog.txt for the exact source change list and validation details.

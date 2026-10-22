@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+from cli_progress import Progress, progress_job
+
 # Video metadata probing imports OpenCV before decoded float EXRs are read.
 # OpenCV caches this option when it loads, so configure it at process startup.
 # EXR support is required by this launcher's high-precision preparation path.
@@ -246,7 +248,9 @@ def video_metadata(path):
 
 
 def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matte=False):
-    fps, _ = video_metadata(source)
+    with Progress('Reading media metadata', unit=None):
+        fps, frame_count = video_metadata(source)
+    total = min(frame_count, num_frames) if frame_count > 0 and num_frames > 0 else max(frame_count, num_frames, 0)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     if matte:
@@ -260,23 +264,50 @@ def decode_video(source, destination, color, levels, num_frames, ffmpeg, *, matt
         if levels != 'auto':
             filters += f':rangein={levels}'
         filters += ',format=gbrpf32le'
-    command = [str(ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', str(source),
+    command = [str(ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin', '-nostats',
+               '-progress', 'pipe:1', '-stats_period', '0.5', '-y', '-i', str(source),
                '-map', '0:v:0', '-an', '-sn', '-dn', '-vf', filters, '-fps_mode', 'passthrough']
     if num_frames > 0:
         command += ['-frames:v', str(num_frames)]
     command += ['-c:v', 'exr', '-compression', 'zip16', '-threads', '2',
                 '-start_number', '0', str(destination / 'frame_%08d.exr')]
-    result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace')
-    if result.returncode:
-        raise RuntimeError(f'Could not decode {source}:\n{result.stderr.strip()}')
-    if not image_files(destination):
-        raise RuntimeError(f'Video produced no decoded frames: {source}')
+    with Progress('Decoding matte' if matte else 'Decoding source', total) as progress, tempfile.TemporaryFile() as error_log:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=error_log,
+                                   text=True, encoding='utf-8', errors='replace')
+        try:
+            for line in process.stdout:
+                key, _, value = line.strip().partition('=')
+                if key == 'frame':
+                    progress.update(int(value))
+            result = process.wait()
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+        finally:
+            process.stdout.close()
+        if result:
+            error_log.seek(max(0, error_log.seek(0, 2) - 16384))
+            error = error_log.read().decode('utf-8', errors='replace').strip()
+            raise RuntimeError(f'Could not decode {source}:\n{error}')
+        frames = image_files(destination)
+        if not frames:
+            raise RuntimeError(f'Video produced no decoded frames: {source}')
+        # Metadata frame counts can be approximate; finish with the actual count.
+        progress.update(len(frames), total=len(frames))
     if not matte and color != 'linear':
         import cv2
-        for path in image_files(destination):
-            values = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-            if values is None or not cv2.imwrite(str(path), decode_transfer(values, color)):
-                raise RuntimeError(f'Could not linearize decoded frame: {path}')
+        with Progress('Linearizing source', len(frames)) as progress:
+            for index, path in enumerate(frames, 1):
+                values = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                if values is None or not cv2.imwrite(str(path), decode_transfer(values, color)):
+                    raise RuntimeError(f'Could not linearize decoded frame: {path}')
+                progress.update(index)
     return PreparedMedia(destination, fps)
 
 
@@ -288,29 +319,33 @@ def decode_sequence(source, destination, color, fps, num_frames):
         frames = frames[:num_frames]
     if not frames:
         raise ValueError(f'No supported frames: {source}')
-    if color == 'linear' and all(p.suffix.lower() == '.exr' for p in frames):
-        return PreparedMedia(Path(source), fps)
-    destination.mkdir(parents=True, exist_ok=True)
-    for index, path in enumerate(frames):
-        raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        if raw is None:
-            raise ValueError(f'Cannot read image: {path}')
-        values = raw.astype(np.float32)
-        if np.issubdtype(raw.dtype, np.integer):
-            values /= np.iinfo(raw.dtype).max
-        if values.ndim == 2:
-            values = np.repeat(values[:, :, None], 3, axis=2)
-        values = decode_transfer(values[:, :, :3], color)
-        if not cv2.imwrite(str(destination / f'frame_{index:08d}.exr'), values):
-            raise RuntimeError(f'Could not write decoded image: {path}')
+    with Progress('Preparing frame sequence', len(frames)) as progress:
+        if color == 'linear' and all(p.suffix.lower() == '.exr' for p in frames):
+            progress.update(len(frames))
+            return PreparedMedia(Path(source), fps)
+        destination.mkdir(parents=True, exist_ok=True)
+        for index, path in enumerate(frames):
+            raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            if raw is None:
+                raise ValueError(f'Cannot read image: {path}')
+            values = raw.astype(np.float32)
+            if np.issubdtype(raw.dtype, np.integer):
+                values /= np.iinfo(raw.dtype).max
+            if values.ndim == 2:
+                values = np.repeat(values[:, :, None], 3, axis=2)
+            values = decode_transfer(values[:, :, :3], color)
+            if not cv2.imwrite(str(destination / f'frame_{index:08d}.exr'), values):
+                raise RuntimeError(f'Could not write decoded image: {path}')
+            progress.update(index + 1)
     return PreparedMedia(destination, fps)
 
 
 @contextmanager
 def prepare_job(job, settings, ffmpeg):
     settings.cache_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='job_', dir=settings.cache_root) as temporary:
-        work = Path(temporary) / job.source.stem
+    temporary = tempfile.TemporaryDirectory(prefix='job_', dir=settings.cache_root)
+    try:
+        work = Path(temporary.name) / job.source.stem
         work.mkdir()
         print(f'Decoding {job.source.name} as {COLOR_LABELS[settings.input_color]} ...', flush=True)
         if job.input_path.is_dir():
@@ -333,6 +368,9 @@ def prepare_job(job, settings, ffmpeg):
             if len(image_files(hint)) < source_count:
                 raise ValueError('The full matte has fewer frames than the selected source segment.')
         yield prepared, hint, work / 'features'
+    finally:
+        with Progress('Cleaning temporary cache', unit=None):
+            temporary.cleanup()
 
 
 def inference_command(prepared, hint, output_dir, settings, ffmpeg, feature_cache=None):
@@ -428,7 +466,8 @@ def main(argv=None):
             return 0
         for index, job in enumerate(jobs, 1):
             print_header(f'Clip {index}/{len(jobs)}: {job.source.name}')
-            run_job(job, settings, ffmpeg)
+            with progress_job(f'{index}/{len(jobs)}'):
+                run_job(job, settings, ffmpeg)
         print_header('All selected clips completed')
         return 0
     except KeyboardInterrupt:
